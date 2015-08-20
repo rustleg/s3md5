@@ -1,0 +1,283 @@
+s3md5 Backup Design
+===================
+
+Documents the design of my s3 backup system
+
+Objectives
+==========
+1. One click backup refresh from a link on the desktop. Optionally schedule background job with cron.
+2. Use simple text files containing a list of the folders to back up and some regex file/folder exclusions.
+3. Keep historic versions by not deleting files from the backup (versioning won't need to be turned on in s3).
+4. Keep one copy of each file even if there are multiple copies in my system.
+5. Don't reupload when filenames or locations are changed (I often find myself moving and reorganising files).
+6. Exclusion patterns for path and filenames. Exclusions added later will not delete files from index or s3 (but could do this manually if desired)
+7. Individual files may be deleted from the backup by altering a status flag in the relevant index entry.
+8. Retrieval will require manual work (because retrieval is a very rare event) but backups will be automatic.
+9. For retrieval recreate original folder structure within special retrieval folder. Then manually move back to where required.
+10. Avoid dependence on external tools as much as possible. Currently s3tools is used with awscli as an option (slightly less functions available in awscli). Functions depending on external package are isolated in their own script file.
+
+Cautions
+========
+Everything depends on index not being lost or corrupted. Old indexes are separately backed up on s3. However, failing that, a new index could be generated for existing files in the system which would then only omit old deleted orphan files still existing on s3. You can list the orphans by running an audit script although this will only show the MD5 name so you won't know what the original file name or path was.
+
+s3 Pricing (EU-West)
+====================
+(as at 15/3/2015)
+Storage: $.03 / GB/mth
+Put request: / list request $.005 / 1000 requests
+Get request: / list request $.004 / 1000 requests
+Data transfer in: Free
+Data transfer out:
+  first 1GB/mth free
+  then $.09 / GB
+  
+For 200GB:
+  storage: $6 per month
+  one-time uploading 30000 files = cost of put requests = $0.15
+  one-time downloading all 200GB = $18
+    (may do this to verify MD5s)  
+
+Sizes
+=====
+(my system as at 15/3/2015)
+            No of files  GB
+dataNAS          20624   56
+Music             5253   96
+
+Total            25877  152
+
+s3 Buckets
+==========
+(Name has to be all lowercase - this system assumes you have a unique prefix to bucket names - all s3 buckets for all customers reside in the same namespace)
+mybucket-backupsoftware (manually uploaded)
+mybucket-datanas
+mybucket-music
+mybucket-test
+
+Except for mybucket-backupsoftware each bucket has 5 (psuedo) folders:
+	deletes - temporary area for files being deleted - transferred to trash folder after all uploads confirmed
+  files - the actual backup files, no subdirectories
+  index - every revised index will be backed up here, so history will be available in case latest ones are corrupt
+    each index will be timestamped. Also (pseudo) subfolders used e.g. mybucket-datanas/index/2015/07/04/s3md5ix-datanas-2015-07-04-214629.tsv so can delete a group of them easily in the s3 console by deleting the higher level folder
+  trash - deleted files, the original path is appended to the md5 name but with slashes replaced with dashes
+  uploads - temporary area for files being uploaded - transferred to files folder after all uploads confirmed
+  
+mybucket-backupsoftware - contains all scripts, etc, including s3tools or other packages, plus documentation (including this file)
+
+s3 file naming
+==============
+use: 
+  MD5(32 characters)
+  example: bfe14860b665430fcad9be40ec5efdb7
+    
+Benefits:
+  MD5 assures uniqueness (see articles on collision probabilities - they are astronomically minimal)
+    so file can be identified solely by its MD5, use of MD5s avoids duplicates
+  can relocate/rename files without having to reupload, also no problem with any copying that alters timestamp
+    N.B. the script assumes that any file altered (i.e. the MD5 changes) will have a new timestamp so it can look for changes without recomputing all MD5s
+
+Index file
+==========
+tab delimited list :
+  1) MD5
+  2) filedate-time (example 20150215-083702)
+  3) date deleted (if all copies are deleted from file system) = 0 or 8 characters date
+  4) filesize bytes
+  5) local status 0,1
+  6) s3 status 0,1
+  7) request - 0,1,2
+  8) folderpath
+  9) filename
+
+		path and filename cannot contain double quote (but may contain single quote)
+		
+    status is 
+      local status  : 0 = deleted, 1 = current file in system
+      s3 status     : 0 = not yet in s3,  1 = in s3
+      request       : 0 = do not back up, 1 = backup required, 2 download required
+      
+      i.e 12 variants:
+      
+        0,0,0 historic info, no copy of this file exists
+        0,0,1 error - file doesn't exist so cannot back up -> 0,0,0
+        0,0,2 error - trying to download file not in s3 -> 0,0,0
+        0,1,0 remote file deleted
+        0,1,1 backed up old file
+        0,1,2 download request
+        1,0,0 do not back up (even though there is a local copy)
+        1,0,1 back up request
+        1,0,2 error - trying to download file not in s3, although is on local system -> 1,0,1
+        1,1,0 remote file deleted (but still in local system)
+        1,1,1 backed up
+        1,1,2 error - download request although should already be on local system -> 1,1,1
+  
+Can manipulate index in spreadsheet in order to delete files from backup by changing request from 1 to 0, or get a download by changing request  from 1 to 2. Both should be rare, so no need to automate more.
+
+When backup is run the index is updated based on current state of file system and new index created assuming all requests are successful, before the actual requests are processed on the internet. All requests processed are validated. If the script terminates before all validations succeed, the validations are redone on the next run until 100% successful.
+
+Using tabs means can directly import/export to spreadsheet without changing format and does not clash with filenames (as a comma would). Note both Excel and LibreOffice Calc will load and subsequently save a tab separated file, but you have to be careful not to accidentally delete a tab (perhaps need some safety checks here).
+
+Calculation of size of my index is as follows:
+(Music separated because lengths longer)
+If average path character length is say 40 chars, average filename length say 20 chars
+(but Music paths and filenames larger - say 90 , 30 )
+then one line is approx 135 (196 Music) characters
+Total size of index will be approx 4 - 5 MB
+            data  Music 
+  md5         32  32  
+  date-time   15  15  
+  size         7   8  
+  date         2   2 (average?)  
+  status       3   3  
+  path        40  90  
+  filename    20  30  
+  tabs, lf     9   9  
+    Total    135 196  
+      x    20000 5000  
+      =      2.7 0.98 MB
+               3.7 MB
+    Will grow with historic delete information. Separate buckets will have separate indexes.
+
+Sample s3cmd commands
+=====================
+
+store one file
+  if filename in bucket is thispath/file1.pdf
+  ... so appears as if in a subdirectory thispath
+  $ s3cmd put testfiles/Logo1-test.jpg s3://mybucket-nas/thispath/file1.jpg
+  
+store one directory contents
+  $ s3cmd put -n whatever/testdir/* s3://mybucket-nas/files/
+    ( -n is dry-run)
+    results in files: s3://mybucket-nas/files/file1.xyz 
+      note testdir not part of s3 name (s3cmd only uses last part of specified path)
+  
+store one file with name changed to its MD5 (use quotes in case there are spaces in filename)
+  $ s3cmd put "whatever/test/this file.txt" s3://mybucket-nas/files/9bc823626fe98c289094fdc06a06782e
+  $ s3cmd put "/tmp/s3uploads/Xmas Present List.xlsx" s3://mybucket-nas/files/2760202d5f90aa9549726e8062a32c8b
+    (avoids copying the file to tmp and changing name to its MD5,
+      although this would be relatively quick)
+    N.B. To store with a different name (i.e. the MD5) then must do each file individually
+      alternative is to copy files locally and change names, then can use sync command
+      but see problem below (needs to make list, so costs more)
+      therefore use put file-by-file 
+        disadvantage then is doesn't check if file is there already, 
+        .. so may upload again but shouldn't happen if index is correct
+
+  typical output is:
+  $ s3cmd put "/tmp/s3uploads/Xmas Present List.xlsx" s3://mybucket-nas/files/2760202d5f90aa9549726e8062a32c8b
+  
+  /tmp/s3uploads/Xmas Present List.xlsx -> s3://mybucket-nas/files/2760202d5f90aa9549726e8062a32c8b  [1 of 1]
+   1209004 of 1209004   100% in    8s   132.09 kB/s  done
+  $
+
+store one file which is already named by its MD5
+  $ s3cmd put "/tmp/s3uploads/96c17a1fcdc37ab967fdc1c19d3ce02f" s3://mybucket-nas/files/
+    N.B. could add option --no-preserve
+      avoids also storing some metadata,
+      but metadata includes the MD5 so might be best to leave it there
+
+sync directory
+  $ s3cmd sync "whatever/testdir/" s3://mybucket-nas/files/
+    doesn't delete files, doesn't download only uploads
+    problem is that it checks if the files are already there, so needs to run a list command
+
+  typical output of sync:
+  $ s3cmd sync  /tmp/s3uploads/ s3://mybucket-nas/files/
+
+  WARNING: Empty object name on S3 found, ignoring.   ### this is a bug in s3cmd, but can ignore
+  /tmp/s3uploads/96c17a1fcdc37ab967fdc1c19d3ce02f -> s3://mybucket-nas/files/96c17a1fcdc37ab967fdc1c19d3ce02f  [1 of 2]
+   9740 of 9740   100% in    0s    79.04 kB/s  done
+  /tmp/s3uploads/9bc823626fe98c289094fdc06a06782e -> s3://mybucket-nas/files/9bc823626fe98c289094fdc06a06782e  [2 of 2]
+   8590 of 8590   100% in    0s    62.42 kB/s  done
+  Done. Uploaded 18330 bytes in 1.0 seconds, 17.90 kB/s. Copied 0 files saving 0 bytes transfer.
+  $ 
+
+move all files from one bucket to another
+  s3cmd mv s3://mybucket-uploads/* s3://mybucket-nas/files/
+    N.B. if a file already exists in request, only one will remain 
+      - not sure if it overwrites or discards the file to be moved
+
+retrieve one file
+  $ s3cmd get s3://mybucket-nas/thispath/file1.pdf localpath/file
+  
+retrieve all files within thispath
+  $ s3cmd get -r s3://mybucket-nas/thispath/
+
+list everything
+  s3cmd ls -r s3://mybucket-nas
+
+list everything with part of name specified
+  $ s3cmd ls -r s3://mybucket-nas/thispath/file
+  2015-03-15 17:30  38063844   s3://mybucket-nas/thispath/file1.flac
+  2015-03-14 21:03      8254   s3://mybucket-nas/thispath/file2.pdf
+  2015-03-14 21:03      1977   s3://mybucket-nas/thispath/file3.pdf
+
+list with MD5:
+  $ s3cmd ls -r --list-md5 s3://mybucket-nas/thispath/file
+  2015-03-15 17:30  38063844   2c6a08e1314498868e34cb55873c5ddb  s3://mybucket-nas/thispath/file1.flac
+  2015-03-14 21:03      8254   c8cbf78009f61fb8fd7801241d1d5d4d  s3://mybucket-nas/thispath/file2.pdf
+  2015-03-14 21:03      1977   9c1fd64c14e3d7bc91bcc65810612368  s3://mybucket-nas/thispath/file3.pdf
+  
+find list of partial uploads (after something aborted)
+  $ s3cmd multipart s3://mybucket-nas
+  s3://mybucket-nas/
+  Initiated Path  Id
+  2015-03-16T10:46:07.000Z  s3://mybucket-nas/thispath/file5.flac  1gbYzMbmHf2GI6pT.UrtOFQEzHPJir9qRsrCF0aMZSJtdS.gmErn.bUYmSl1TkI33I6aUOCfeCDEW9tX1FiVgMcNndmiSutPNQv5soD3EzCVFB0xMCDHrqx0gKTalc5x
+      
+abort a multipart upload
+  s3cmd abortmp s3://mybucket-nas/thispath/file5.flac  1gbYzMbmHf2GI6pT.UrtOFQEzHPJir9qRsrCF0aMZSJtdS.gmErn.bUYmSl1TkI33I6aUOCfeCDEW9tX1FiVgMcNndmiSutPNQv5soD3EzCVFB0xMCDHrqx0gKTalc5x
+
+
+Sample aws cli commands
+=======================
+list all buckets
+	$ aws s3 ls
+	2015-04-09 08:29:22 mybucket-mydocs
+	2015-03-14 20:33:43 mybucket-nas
+
+list folders in bucket
+	$ aws s3 ls s3://mybucket-nas
+                           PRE files/
+                           PRE index/
+                           PRE software/
+                           PRE trash/
+                           PRE uploads/
+                           
+list files in folder "trash"
+	$ aws s3 ls s3://mybucket-nas/trash  # missing backslash
+                           PRE trash/
+	$ aws s3 ls s3://mybucket-nas/trash/
+	2015-04-21 15:18:17          0 
+	2015-04-24 19:03:18        319 2d7ef4e197f4b96c4ff9d285f1fe7e00 -data-testfiles-iq114248.puz
+	2015-04-21 19:51:25     119010 5c0685e59fc328b59d5fe00a15a6c9d9-data-testfiles-dir4-StockCheck2015AprRussell.xlsx
+
+upload file
+	$ aws s3 cp /data/testfiles/iq114248.puz s3://mybucket-nas/trash/2d7ef4e197f4b96c4ff9d285f1fe7e00
+	upload: ../data/testfiles/iq114248.puz to s3://mybucket-nas/trash/2d7ef4e197f4b96c4ff9d285f1fe7e00
+
+download file (copies in other direction) with different name
+	$ aws s3 cp s3://mybucket-nas/trash/targetname /data/tmp/downloadedfile
+	download: s3://mybucket-nas/trash/targetname to ../data/tmp/downloadedfile
+
+download file (copies in other direction) with same name
+	$ aws s3 cp s3://mybucket-nas/trash/testmove.txt /tmp/zzz
+	download: s3://mybucket-nas/trash/testmove.txt to ../../../../../tmp/zzz/testmove.txt
+	(N.B. if zzz not a folder then it is assumed to be the filename)
+
+move one file from one bucket folder to another with different name
+	$ aws s3 mv s3://mybucket-nas/files/originalfile.txt s3://mybucket-nas/trash/testmove.txt
+	move: s3://mybucket-nas/files/originalfile.txt to s3://mybucket-nas/trash/testmove.txt
+
+move one file from one bucket folder to another without change of name
+	$ aws s3 mv s3://mybucket-nas/files/file1.txt s3://mybucket-nas/uploads/
+	move: s3://mybucket-nas/files/file1.txt to s3://mybucket-nas/uploads/file1.txt
+	
+move all files from one bucket folder to another
+	$ aws s3 mv --recursive s3://mybucket-nas/uploads/ s3://mybucket-nas/files/
+	move: s3://mybucket-nas/uploads/file2.txt to s3://mybucket-nas/files/file2.txt
+	move: s3://mybucket-nas/uploads/file1.txt to s3://mybucket-nas/files/file1.txt
+	move: s3://mybucket-nas/uploads/testfile.txt to s3://mybucket-nas/files/testfile.txt
+
+
+

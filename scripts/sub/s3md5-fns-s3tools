@@ -1,0 +1,139 @@
+#!/bin/bash
+#
+# s3md5-s3toolsfns -  # s3tools interface function
+# separated out because may wish to use different client such as AWS CLI
+
+#-----------------------------------------------------------------------------------------------
+function createscript  { # produces final set of commands
+	# from sorted S3BATCH file, which has following tab separated lines:
+	# localcopy line is [1 cp sourcepathfile MD5]
+	# del line is [2 del sourcepathfile MD5 trashdate pseudoname]
+	# get line is [3 get sourcepathfile MD5 size]
+	# put line is [4 put sourcepathfile MD5 size]
+
+
+	gawk '
+	BEGIN { FS = "\t"; OFS = "\t" 
+	encrypt = ( "'${ENCRYPT}'" == "Y" )
+	printf( "#!/bin/bash\n" )
+	prefix = "'"${THROTTLE}"'"
+	postfix1 = "2>> " "'${TMPERRLOG}'"
+	postfix2 = "2>> " "'${TMPERRLOG}'" " | tee " "'${TMPS3LOG}'"
+  countcommands=0
+
+	flagsput="-s --no-preserve" 
+	flagsget="-s"  # -s = use ssl
+	flagsdel="-s"
+  # --no-preserve = Do not store FS attributes
+
+	# postcommand:
+	# this bash function is added after each command
+	# timestamp the logs, decrement command count, save state and check for abort (STOP) request
+	}
+	$1 ~ /1/ { # local copy
+		precommand()
+		printf("cp -p -n \"%s\" %s/%s %s ; postcommand\n", $3, "'${RECOVERYDIR}'", $4, postfix1) 
+		# -p preserve attributes
+		# -n no clobber
+  }
+	$1 ~ /2/ { # del = delete i.e. move into trash folder in s3 with added pseudoname
+		precommand()
+		printf("s3cmd %s mv %s/%s \"%s/%s-%s%s\" %s ; postcommand\n", flagsdel, "'${FILESBUCKETFOLDER}'", $4 , "'${DELETESBUCKETFOLDER}'" , $5, $4, $6, postfix2 )
+  }
+	$1 ~ /3/ { # get = download to RECOVERYDIR
+		precommand()
+		if ( encrypt)
+			dest="'${ENCGETFILES}'"
+		else
+			dest= "'${RECOVERYDIR}'"
+		printf("%s s3cmd %s get %s/%s %s %s ; ", prefix, flagsget, "'${FILESBUCKETFOLDER}'", $4, dest, postfix2) 
+		if ( encrypt) { # decrypts after download
+			printf("cat %s | gpg --quiet --no-tty --batch --yes --passphrase-fd 0 -o %s/%s -d %s/%s %s ; " , "'${AESKEYFILE}'","'${RECOVERYDIR}'", $4, "'${ENCGETFILES}'" , $4 , postfix1)
+		}
+		printf(" postcommand\n") 
+  }
+	$1 ~ /4/ { # put = upload
+		precommand()
+		if ( encrypt) {
+			temp="'${ENCPUTFILES}'/" $4
+			printf("cat %s | gpg --no-tty --batch --yes --passphrase-fd 0 --symmetric --cipher-algo aes256 -o %s \"%s\" %s ; " , "'${AESKEYFILE}'", temp , $3, postfix1)
+			$3= temp
+		}
+		printf("%s s3cmd %s put \"%s\" %s/%s %s ; postcommand\n", prefix, flagsput, $3, "'${UPLOADSBUCKETFOLDER}'", $4, postfix2) 
+  }
+	function precommand() {
+		countcommands++
+		# N.B. must use echo instead of printf because rogue % in filenames is interpreted as print control
+		# hopefully there will not be any backslashes in the filenames
+		printf("cat /dev/null > " "'${TMPERRLOG}'" "; echo \"===> %s %s\"", $2 , $3)
+		if ( $1 < 3 )
+			printf(" ; ")
+		else
+			printf(" %.3f MB ; ", $5/1000000)
+		}
+	' >${CMDSCRIPT}  ${TMPS3COMMANDS2}
+}
+# -----------------------------------------------------------------------------------------------
+function listuploadsbucket { # into checklist format i.e. MD5 <operation>
+	s3cmd ls ${UPLOADSBUCKETFOLDER}/ 2> ${TMPERRLOG} > ${UPLOADSLIST}
+	addtimestamplog "${TMPERRLOG}" "${ERRLOG}" # adds to permanent log with timestamp
+	# typical output is:
+	# 2015-05-06 08:36         0   s3://myuniquename-nas/uploads/
+	# 2015-05-07 10:48     92775   s3://myuniquename-nas/uploads/3d2d7b4d4cac1a30ffb593bab58e4e49
+	# 2015-05-07 10:48     93607   s3://myuniquename-nas/uploads/3f6961a854d9d90118a549d271983f44
+	# ...(etc)
+	gawk ' # reformat uploads list into checklist format
+	BEGIN { pre=length("'${UPLOADSBUCKETFOLDER}'") }
+	{ MD5=substr($4,pre+2) # extra +1 is for / at end
+		if (length(MD5) == 32 )
+			printf("%s\tput\n", MD5)
+	} ' >${TMPUPLOADSCHECK} ${UPLOADSLIST}
+}
+#-----------------------------------------------------------------------------------------------
+function listdeletesbucket { # into checklist format i.e. MD5 <operation>
+	s3cmd ls ${DELETESBUCKETFOLDER}/ 2> ${TMPERRLOG} > ${DELETESLIST}
+	addtimestamplog "${TMPERRLOG}" "${ERRLOG}" # adds to permanent log with timestamp
+	# typical output is: (filename could have spaces)
+	#	2015-05-05 10:29         0   s3://myuniquename-nas/deletes/
+	# 2015-05-07 10:44    700922   s3://myuniquename-nas/deletes/2015-05-07-9c6e5f9ab7f06c5a17699812d6ad48e9-mnt-dataNAS-MyDocs-Ebay-PineTable-extended.jpg
+	# 2015-05-07 17:13    113524   s3://myuniquename-nas/deletes/2015-05-07-a2b0219cfbccbede8aff9118fff4c562-mnt-dataNAS-MyDocs-JanetDrive-Darts-Darts Game Sheet 2-L.xlsx
+	# ...(etc)
+	# reformat DELETESLIST list into checklist format
+	gawk ' # reformat deletes list into checklist format
+	BEGIN { pre=length("'${DELETESBUCKETFOLDER}'") }
+	{ if ( length($4) > pre+1 ) { # skips top line
+			MD5=substr($4,pre+13,32) # last token, skip 11 chars date at front, 1 for / at end of bucket folder
+			printf("%s\tdel\n", MD5)
+		}
+	} ' >${TMPDELETESCHECK} ${DELETESLIST}	
+}
+#-----------------------------------------------------------------------------------------------
+function listfilesbucket { # just extract the MD5 (for typical output see listuploadsbucket
+	s3cmd ls ${FILESBUCKETFOLDER}/ 2> ${TMPERRLOG} > ${TMPS3FILESLIST}
+	addtimestamplog "${TMPERRLOG}" "${ERRLOG}" # adds to permanent log with timestamp
+	gawk ' # reformat to just list the MD5 filename
+	BEGIN { pre=length("'${FILESBUCKETFOLDER}'") }
+	{ MD5=substr($NF,pre+2) # extra +1 is for / at end
+		if (length(MD5) == 32 ) # skips top line
+			printf("%s\n", MD5)
+	} ' >${S3FILESLIST} ${TMPS3FILESLIST}
+}
+#-----------------------------------------------------------------------------------------------
+function emptytmpbuckets {	
+#	bashdebug "emptytmpbuckets: "
+	touch ${TMPERRLOG} ${TMPS3LOG}
+	s3cmd mv -r ${UPLOADSBUCKETFOLDER}'/'  ${FILESBUCKETFOLDER}'/' 2>> ${TMPERRLOG} | tee -a ${TMPS3LOG}
+	s3cmd mv -r ${DELETESBUCKETFOLDER}'/'  ${TRASHBUCKETFOLDER}'/' 2>> ${TMPERRLOG} | tee -a ${TMPS3LOG}
+	addtimestamplog "${TMPERRLOG}" "${ERRLOG}" # adds to permanent log with timestamp
+	addtimestamplog "${TMPS3LOG}" "${S3LOG}" # adds to permanent log with timestamp
+}
+#-----------------------------------------------------------------------------------------------
+function uploadindex {
+#	bashdebug "upload index"
+	local saveas=${TODAYYR}"/"${TODAYMTH}"/"${TODAYDAY}"/"${ARCHIVEDINDEX}
+	s3cmd put ${INDEX} ${INDEXBUCKETFOLDER}/${saveas} 2> ${TMPERRLOG} | tee ${TMPS3LOG}
+	addtimestamplog "${TMPERRLOG}" "${ERRLOG}" # adds to permanent log with timestamp
+	addtimestamplog "${TMPS3LOG}" "${S3LOG}" # adds to permanent log with timestamp
+}
+#-----------------------------------------------------------------------------------------------
+

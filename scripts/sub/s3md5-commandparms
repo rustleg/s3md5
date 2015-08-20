@@ -1,0 +1,38 @@
+#!/bin/bash
+# s3md5-commandparms - parse command line parameters
+#
+# sourced in main progs
+#
+
+# BUCKET is declared in s3md5-userparms
+
+declare THROTTLE=
+
+# parse command line options
+declare OPTION
+while [[ $# > 1 ]]
+do
+	OPTION="$1"
+	case $OPTION in
+		-b|--bucket)
+		BUCKET="$2"
+		shift
+		;;
+		-t|--throttle)
+		THROTTLE="trickle -s -u $2"
+		shift
+		;;
+		*)
+		echo "******* Unknown option, aborted"
+		exit 1
+		;;
+	esac
+	shift # shifts over option specified
+done
+
+
+if [ "${BUCKET}" == "test" ] ; then
+	S3MD5ROOT=/data/WorkInProgressSSD/s3dev/s3md5BackupSystemTest # location of this system
+fi
+
+

@@ -1,0 +1,677 @@
+#!/bin/bash
+# s3md5-functions
+#
+
+#===============================================================================================
+#-----------------------------------------------------------------------------------------------
+function initialise {
+	if [ ! -d "${ENCGETFILES}" ]; then mkdir "${ENCGETFILES}" ; fi
+	if [ ! -d "${ENCPUTFILES}" ]; then mkdir "${ENCPUTFILES}" ; fi
+
+#	cat /dev/null > ${DEBUGLOG}	
+  initialise-index
+}
+#-----------------------------------------------------------------------------------------------
+function initialise-index { # uses latest archived index as current working index
+  # abort if index archive directory doesn't exist - need at least one file in it even if empty
+  if [ ! -d "${INDEXDIR}" ]; then
+    # maybe NAS not responding ?
+    printf "Backup failed - Cannot find index archive directory\n ${INDEXDIR}\n ... Aborting.\n" 1>&2
+		if [ "${USEZENITY}" = true ]; then
+			zenity --warning --title="s3md5 Backup failed" --text="Backup failed - Cannot find index archive directory" --no-wrap --display=:0.0
+		fi
+   	rmdir ${ISRUNNINGDIRECTORY}
+    exit 1
+  fi  
+
+  # get latest archived index
+  ls -1 ${INDEXDIR}/*.tsv > ${ARCHIVELIST} 2>/dev/null
+  EXITSTATUS=$?
+  if [ $EXITSTATUS -ne 0 ]; then
+    printf "Creating first index\n"
+    LATESTARCHIVE="${INDEXDIR}/s3md5ix-$(${TIMESTAMP}).tsv"
+    touch ${LATESTARCHIVE}
+  else
+    LATESTARCHIVE=$(sort ${ARCHIVELIST} | tail -1)
+  fi
+
+	printf "latest index is ${LATESTARCHIVE}\n" | tee ${TMPPROGRESSLOG}
+	addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+  
+  # set up working archive from latest version
+  # overwrite any existing file found as may not be intact
+  cp -f --preserve=all ${LATESTARCHIVE} ${INDEX} 
+}
+#-----------------------------------------------------------------------------------------------
+function readstate {
+  if [ ! -e ${STATEFILE} ]; then
+    touch ${STATEFILE}
+    if [ -e ${S3BATCH} ]; then {
+	    TOTALCOMMANDS=$(wc -l < ${S3BATCH})
+	    REMAININGCOMMANDS=${TOTALCOMMANDS}
+	    # set true so that checks are made
+   	  UPLOADSATTEMPTED=true
+		  DELETESATTEMPTED=true
+	  }
+	  else
+	    TOTALCOMMANDS=0
+	    REMAININGCOMMANDS=0
+			UPLOADSATTEMPTED=false
+			DELETESATTEMPTED=false
+ 	  fi
+		RETRYCOUNT=0
+		savestate
+  else
+	  read UPLOADSATTEMPTED DELETESATTEMPTED TOTALCOMMANDS REMAININGCOMMANDS RETRYCOUNT < ${STATEFILE}
+  fi
+#  bashdebug "readstate: UPLOADSATTEMPTED:${UPLOADSATTEMPTED} DELETESATTEMPTED:${DELETESATTEMPTED} TOTALCOMMANDS=${TOTALCOMMANDS} REMAININGCOMMANDS=${REMAININGCOMMANDS} RETRYCOUNT=${RETRYCOUNT}"
+}
+#-----------------------------------------------------------------------------------------------
+function savestate {
+	# N.B. this is also done in an AWK routine below
+  printf "${UPLOADSATTEMPTED} ${DELETESATTEMPTED} ${TOTALCOMMANDS} ${REMAININGCOMMANDS} ${RETRYCOUNT}" > ${STATEFILE}
+#  bashdebug "save state: UPLOADSATTEMPTED:${UPLOADSATTEMPTED} DELETESATTEMPTED:${DELETESATTEMPTED} TOTALCOMMANDS=${TOTALCOMMANDS} REMAININGCOMMANDS=${REMAININGCOMMANDS} RETRYCOUNT=${RETRYCOUNT}"
+}
+#-----------------------------------------------------------------------------------------------
+function bashdebug {	
+	local par=$*
+	printf "%s | %s\n" $(${TIMESTAMP}) "$par"  >> ${DEBUGLOG}
+}
+#-----------------------------------------------------------------------------------------------
+function addtimestamplog {	# adds lines from first file to second file preceded by timestamp
+	if [ -e $1 ]; then
+		sed 's/^/'$(${TIMESTAMP})'| /g' "$1" >> "$2"
+	fi
+}
+#-----------------------------------------------------------------------------------------------
+function storeindex {
+	# save new index into archive if it has changed
+	# first sort into path,file,date,time order
+	LC_ALL=C sort -t$'\t' -k 8,9 -k 2,3 ${NEWINDEXBYMD5} >${NEWINDEXBYPATH}
+	declare ORIGMD5=($(md5sum ${INDEX}))
+	declare NEWMD5=($(md5sum ${NEWINDEXBYPATH}))
+	if [ "${ORIGMD5}" != "${NEWMD5}" ]; then
+		printf "... store changed index\n"  | tee ${TMPPROGRESSLOG}
+		addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}		
+		cp ${NEWINDEXBYPATH} ${INDEX}
+		ARCHIVEDINDEX=s3md5ix-${BUCKET}-$(date +%Y-%m-%d-%H%M%S).tsv
+		mv ${NEWINDEXBYPATH} ${INDEXDIR}/${ARCHIVEDINDEX}
+		uploadindex 
+	fi
+}
+#-----------------------------------------------------------------------------------------------
+function readbackuproots {
+#	bashdebug "read backuproots then create list of files to back up ...\n"
+	# create FILELISTREQ of files to back up
+	# clear out the file in case already exists
+	cat /dev/null > ${TMPLISTREQ1}
+	while read INPATH # each path is found from BACKUPROOTS file
+	do
+		if [ "${INPATH}" ]; then
+		  # create list of full paths
+		  find "${INPATH}" -type f  ! -ipath '*.trash-1000*' ! -ipath '*recycle.bin*' -print >> ${TMPLISTREQ1}
+		  # type f means only want files
+		  # ! -ipath '<pattern>' excludes directories of that pattern
+		  #   ... in this case we are excluding all dot paths
+		fi
+	done < ${BACKUPROOTS}
+
+	# remove any blank lines from exclusion list (otherwise excludes everything!)
+	gawk 'NF' >${TMPEXCLUDES} ${EXCLUDES}
+
+	# find files excluded - so user can check the regexes work properly
+	egrep  -f "${TMPEXCLUDES}" "${TMPLISTREQ1}"  > "${EXCLUDEDFILES}"
+
+	# remove exclusions from list of files
+	egrep  -v -f "${TMPEXCLUDES}" "${TMPLISTREQ1}" > "${TMPLISTREQ2}"
+	
+	if [ ! -s "${TMPLISTREQ2}" ] ; then
+		printf "No files satisfy the backuproots and excludes selections, aborting.\n"  | tee ${TMPPROGRESSLOG}
+		addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+		if [ "${USEZENITY}" = true ]; then
+			zenity --warning --title="s3md5 Backup failed" --text="No files satisfy the backuproots and excludes selections" --no-wrap --display=:0.0
+		fi
+		rmdir ${ISRUNNINGDIRECTORY}
+		exit 1
+	fi
+}
+#-----------------------------------------------------------------------------------------------
+function updateindex {
+
+	readbackuproots
+	
+	printf "... creating file list (please wait)\n"  | tee ${TMPPROGRESSLOG}
+	addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+	createlistreq
+
+	# make sure only one entry per file in required list (backuproots may overlap)
+	sort -u ${FILELISTREQ} >${FILELISTUREQ}
+
+	# sort list of files and index in order to compare and update index
+
+	printf "... sort list and update index\n"  | tee ${TMPPROGRESSLOG}
+	addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+
+	# sort file list in path,file,date-time order
+	LC_ALL=C sort -t$'\t' ${FILELISTUREQ} >${FILELISTBYPATH}
+
+	# sort index in path,file,date-time order
+	LC_ALL=C sort -t$'\t' -k 8,9 -k 2 ${INDEX} >${INDEXBYPATH}
+
+	comparewithindex # creates ${INDEXBYPATHWITHNEWFILES}
+	# compare new files list with index, create new records, inc MD5s
+	# ... or update status and request codes of existing record
+
+	# sort index in MD5 order, first field so simple sort
+	LC_ALL=C sort ${INDEXBYPATHWITHNEWFILES} > ${INDEXBYMD5WITHNEWFILES}
+
+	printf "... create commands from index\n"  | tee ${TMPPROGRESSLOG}
+	addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+	# this is a complex routine which processes groups of files with same MD5
+	createcommandsfromindex
+
+	storeindex
+
+}
+#-----------------------------------------------------------------------------------------------
+function	createlistreq { # create list including date,etc from list of filenames
+	cat /dev/null > ${FILELISTREQ}
+	while read PATHNAME
+	do
+		FILENAME=$(basename "${PATHNAME}")
+		DIRNAME=$(dirname "${PATHNAME}")
+		STATSTRING=$(stat --printf="%y %s" "${PATHNAME}")
+		FDATE=$(echo "${STATSTRING:0:4}${STATSTRING:5:2}${STATSTRING:8:2}")
+		FTIME=$(echo "${STATSTRING:11:2}${STATSTRING:14:2}${STATSTRING:17:2}")
+		FSIZE=$(echo "${STATSTRING:36}")
+		# create list of files found - same content as index, but different order and omit MD5 and deleted date
+		printf "%s\t%s\t%s-%s\t%s\n" "${DIRNAME}" "${FILENAME}" ${FDATE} ${FTIME} ${FSIZE}>> "${FILELISTREQ}"
+	done < ${TMPLISTREQ2}
+}
+#-----------------------------------------------------------------------------------------------
+function limits3commands { # produces file S3BATCH with remaining commands in S3COMMANDSREQ
+	gawk ' BEGIN { FS = "\t"; OFS = "\t" 
+		batchcount=0
+		batchsize=0
+		batchlimitnum='${BATCHLIMITNUMBER}'
+		if (batchlimitnum <= 0 ) {
+			batchlimitnum=0
+			batchcount=-1 # otherwise does one too many
+		}		
+		batchlimitkb=1000 * '${BATCHLIMITMB}' # work in kb
+		if (batchlimitkb <= 0 ) 
+			batchlimitkb=0
+	}
+	$2 == "put" { # do at least one before counting
+		if ( batchcount < batchlimitnum && batchsize <= batchlimitkb )
+			print 
+		else
+			print $0 > "'${S3DEFERRED}'"
+		if ( batchlimitnum > 0 ) batchcount++
+		if ( batchlimitkb > 0 ) batchsize+= $5 / 1000
+	}
+	$2 != "put" { print } # do not restrict other commands
+	' > ${S3BATCH} ${S3COMMANDSREQ}
+
+	if [ -e ${S3DEFERRED} ] ; then
+		mv ${S3DEFERRED} ${S3COMMANDSREQ}
+	else
+		rm -f ${S3COMMANDSREQ}
+	fi
+}
+#-----------------------------------------------------------------------------------------------
+function postcommand {	# actions after each s3 update command
+	# add time stamps to logs
+	addtimestamplog ${TMPS3LOG} ${S3LOG}
+	addtimestamplog ${TMPERRLOG} ${ERRLOG}
+	# decrement command count and save state
+	(( REMAININGCOMMANDS-- ))
+	savestate
+	if (( REMAININGCOMMANDS > 0 )) ; then # avoid abort here as complicates subsequent restart
+		checkforabortreq # check for abort
+	fi
+}
+#-----------------------------------------------------------------------------------------------
+function checkforabortreq {
+	# check for abort
+	if [ -e ${STOPFILE} ]; then
+		rm -f ${STOPFILE} # or will not restart!
+		printf "****** Abort request via STOP file - quitting.\n" | tee ${TMPPROGRESSLOG}
+		addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+		rmdir ${ISRUNNINGDIRECTORY}
+		exit 1
+	fi
+}
+#-----------------------------------------------------------------------------------------------
+function comparewithindex {
+	# compare new files list with index, create new records, inc MD5s
+	# ... or update status and request codes of existing record
+	gawk '
+	BEGIN { FS = "\t"; OFS = "\t" 
+	inputnextnew()
+	if ( FOUNDFILE == "z" )
+		{ indexerror( "Error: nothing in backup roots\n ... Aborting" )
+		exit }
+	}
+	{ INDEXCODE = $5 $6 $7
+	# correct any incompatible status and request codes
+	switch ( INDEXCODE ) {
+	case "001":
+		indexerror( $8 "/" $9 " " $2 " - Trying to back up non-existent file" )
+		$7 = "0"
+		break
+	case "002":
+		indexerror( $8 "/" $9 " " $2 " - Trying to download file not in s3" )
+		$7 = "0"
+		break
+	case "102":
+		indexerror( $8 "/" $9 " " $2 " - Trying to download file not in s3, but is local so will upload instead" )
+		$7 = "1"
+		break
+	case "112":
+		indexerror( $8 "/" $9 " " $2 " - Trying to download but already local" )
+		$7 = "1"
+		break
+	}
+	INDEXKEY = $8"\t"$9"\t"$2 # path file date-time
+#	awkdebug("INDEXKEY:" INDEXKEY)
+	# test for next in sequence being a new file not in index
+	while ( INDEXKEY > FOUNDFILE ) { # new file found, create index record
+		outputnew( FOUNDFILE )
+		inputnextnew()
+	}
+	if ( INDEXKEY == FOUNDFILE ) { # found file already in index, review status and request
+		if ( $5 == "0" ) { # old previously deleted file reappeared in file system
+			$5 = "1" # update local status
+			$7 = "1" # assume it should now be backed up
+			$3 = "0" # date deleted
+			indexwarning("Old deleted file reappeared " $8 "/" $9 )
+		}
+		# get next new file
+		inputnextnew()
+	}	else if (INDEXKEY < FOUNDFILE &&  $5 == "1" )  #  - in index as current but no longer in file system
+			$5 = "0" # update local status
+	# output index record  			
+	if (length($1) > 0 ) # it is possible to find a blank line if manually sorted with text editor
+		print
+	}
+	END { 
+		while ( FOUNDFILE < "z" ) { # write remaining new files
+			outputnew( )
+			inputnextnew()
+		}
+	}
+	function inputnextnew(  retcode, linein ) { # get next FOUNDFILE
+		retcode = getline linein < "'${FILELISTBYPATH}'"
+		if ( retcode <= 0 )
+			FOUNDFILE = "z" # use this as end of file, forces rest of index records to be output
+		else {
+			split(linein,fields,"\t")
+			FOUNDFILE = fields[1] "\t" fields[2] "\t"  fields[3] # path file date-time
+		}
+#	awkdebug("FOUNDFILE:" FOUNDFILE )
+	}
+	function outputnew( newrecord ) {
+
+	# compute MD5
+	cmd = "md5sum \"" fields[1] "/" fields[2] "\""   # path/filename
+	cmd | getline MD5 
+	close(cmd)
+	sub(/[[:blank:]].*/,"",MD5) # isolate MD5 part of string
+	# output new record with MD5 and status, request codes 10,1
+	printf ("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",MD5, fields[3], "0", fields[4], "1","0", "1", fields[1], fields[2])
+	}
+	function indexerror(message) {
+	printf ("'$(${TIMESTAMP})'| Index error: %s\n", message) >> "'${ERRLOG}'"
+	}
+	function indexwarning(message) {
+	printf ("'$(${TIMESTAMP})'| Index warning: %s\n", message) >> "'${WARNLOG}'"
+	}
+	function awkdebug(str) {
+		printf("awkdebug: %s\n", str ) >> "'${DEBUGLOG}'"
+	}
+	' >${INDEXBYPATHWITHNEWFILES}  ${INDEXBYPATH}
+}
+#-----------------------------------------------------------------------------------------------
+function createcommandsfromindex {
+	gawk '
+	BEGIN { FS = "\t"; OFS = "\t" 
+	todaynodashes="'${TODAYNODASHES}'"
+	COUNT=0
+	NEWBACKUPSNO=0
+	NEWBACKUPSSIZE=0
+	PREVMD5="z" # force first filematch false
+	}
+	{
+		THISMD5=$1
+		if ( THISMD5 > PREVMD5 ) # process MD5 group for PREVMD5
+			processMD5group()
+		PREVMD5=THISMD5
+		COUNT++
+		MD5[COUNT]=$1
+		FILEDATETIME[COUNT]=$2
+		FILEDELDATE[COUNT]=$3
+		FILESIZE[COUNT]=$4
+		LOCALSTATUS[COUNT]=$5
+		S3STATUS[COUNT]=$6
+		REQUEST[COUNT]=$7
+		TRIPLECODE[COUNT]=$5 $6 $7
+		PATHNAM[COUNT]=$8
+		FILENAM[COUNT]=$9
+	}
+	END {
+		processMD5group()
+		currenttime="'$(date +%Y-%m-%d-%H%M%S)'"
+		if (NEWBACKUPSSIZE < 2000000)
+			printf("%d files to be backed up to s3, total size %d kB\n", NEWBACKUPSNO ,NEWBACKUPSSIZE/1000) > "'${TMPPROGRESSLOG}'"
+		else
+			printf("%d files to be backed up to s3, total size %d MB\n", NEWBACKUPSNO ,NEWBACKUPSSIZE/1000000) > "'${TMPPROGRESSLOG}'"
+	}
+	
+	# note the comments "(brace#)" are just for future use in understanding flow of logic
+	function processMD5group () {#(brace1)
+		localfound=0
+		done=0
+		if ( COUNT == 1 ) {#(brace2) # single MD5 record
+			switch ( TRIPLECODE[1] ) {#(brace3)
+				case "010":
+				case "110":
+					createDEL(1)
+					break
+				case "012":
+					createGET(1)
+					break
+				case "101":
+					createPUT(PATHNAM[1], FILENAM[1], FILESIZE[1])
+			}#(brace3)
+			# update deleted date if appropriate
+			if ( LOCALSTATUS[1] == "0" && FILEDELDATE[1] == "0" )
+				FILEDELDATE[1] = todaynodashes
+		}#(brace2)
+		else {#(brace4) # multiple records now in arrays
+			# examine all records for various conditions
+			
+			reqdel=1
+			for (i=1; i<=COUNT; i++) # look for a delete request
+				if ( REQUEST[i] != "0" ) { #(brace5)
+					reqdel=0 # at least one file needs the s3 backup
+					break;
+				}#(brace5)
+			if ( reqdel == 1 ) {#(brace6) # all require deletion of s3 backup
+				if (S3STATUS[1]=="1") { # all should have same s3 status
+					createDEL(1)
+					for (i=1; i<=COUNT; i++) # mark all as deleted
+						S3STATUS[i]="0"
+				}
+				done=1 # signal no more searching, all backups are deleted
+			}#(brace6)
+				
+			if ( done == 0 ) {#(brace9)
+				for (i=1; i<=COUNT; i++) # look for download request
+					if ( REQUEST[i] == "2" ) {#(brace10)
+						for (j=1; j<=COUNT; j++) {#(brace11) # look for local copy
+							if ( LOCALSTATUS[j] == "1" ) {#(brace12) # local file exists
+								createlocalcopy(PATHNAM[j],FILENAM[j],PATHNAM[i],FILENAM[i],i)
+								localfound=1 
+								LOCALSTATUS[i]="1"
+								REQUEST[i]="1"
+								break
+							}#(brace12)
+						}#(brace11)
+						if ( localfound == 0 ) {#(brace13)
+							createGET(i)
+						}#(brace13)
+						# do not set done=1 because may want to upload local copy
+					}#(brace10)
+				if ( done == 0 ) {#(brace14)
+					for (i=1; i<=COUNT; i++) # all REQUEST must be 1 here
+						if ( S3STATUS[i] == "1" ) {#(brace15) # file already in s3, no need for PUT
+							for (j=1; j<=COUNT; j++) # mark all as already in s3
+								S3STATUS[j]="1"
+							done=1
+							break
+						}#(brace15)
+				}#(brace14)
+				if ( done == 0 ) {#(brace16) # file not found in s3 
+					createPUT(PATHNAM[1], FILENAM[1], FILESIZE[1]) # any path/file will do
+				}#(brace16)
+			}#(brace9)
+			
+			# update deleted date if appropriate
+			infilesystem=0
+			for (i=1; i<=COUNT; i++)
+				if ( LOCALSTATUS[i] == "1" ) {#(brace7)
+					infilesystem=1
+					break
+				}#(brace7)
+			if ( infilesystem == 1)
+				for (i=1; i<=COUNT; i++) 
+					FILEDELDATE[i] = "0" 
+			else 
+				if ( FILEDELDATE[1] == "0" ) # 
+					for (i=1; i<=COUNT; i++) 
+						FILEDELDATE[i] = todaynodashes 
+				
+		}#(brace4) # end of multiple MD5 records
+#		awkdebug( "COUNT=" COUNT " end of processMD5group for MD5-" MD5[1] ) 
+		outputindexrecords(COUNT)
+		COUNT=0
+	}		#(brace1) end of processMD5group
+
+	function outputindexrecords(x) {
+	for (i=1; i<=x; i++) 
+		printf ("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", MD5[i], FILEDATETIME[i], FILEDELDATE[i],
+			FILESIZE[i], LOCALSTATUS[i], S3STATUS[i], REQUEST[i], PATHNAM[i], FILENAM[i] )
+	}
+	function createlocalcopy(sourcepath,sourcefile,destpath,destfile,destrecord) {
+	# line is [1 cp sourcepathfile MD5] separated by tabs
+	printf("1\tcp\t%s\t%s\n", sourcepath "/" sourcefile, MD5[1]) > "'${TMPS3COMMANDSREQ}'"
+	# here also create recovery commands data to enable original file structure to be reproduced
+	recreateoriginal(MD5[1], destpath, destfile,destrecord)
+	# update index assuming the operation suceeds
+	LOCALSTATUS[x]="1"
+	}
+	function createDEL(x,   pathdashes) { # actually moves into TRASHBUCKETFOLDER in s3 - will have to delete separately
+	# create pseudo name for path and file, replacing "/" with "-"
+	# ... attach this to MD5 in trash so will be able to identify it
+	pathdashes=PATHNAM[x] 
+	gsub( "/","-", pathdashes)
+	# line is [2 del sourcepathfile MD5 trashdate pseudoname] separated by tabs
+	printf("2\tdel\t%s\t%s\t%s\t%s-%s\n",PATHNAM[x] "/" FILENAM[x], MD5[x],  "'${DATESTAMP}'", pathdashes, FILENAM[x] ) > "'${TMPS3COMMANDSREQ}'"
+	# update index assuming the operation suceeds
+	S3STATUS[x]="0"
+	REQUEST[x]="0"
+	}
+	function createGET(x) {
+	# downloads to RECOVERYDIR
+	# line is [3 get sourcepathfile MD5 size] separated by tabs
+	printf("3\tget\t%s\t%s\t%s\n", PATHNAM[x] "/" FILENAM[x], MD5[1], FILESIZE[x] ) > "'${TMPS3COMMANDSREQ}'"
+	# here also create recovery commands data to enable original file structure to be reproduced
+	recreateoriginal(MD5[x], PATHNAM[x], FILENAM[x],x)
+	# update index assuming the operation suceeds
+	LOCALSTATUS[x]="1"
+	REQUEST[x]="1"
+	}
+	function createPUT(sourcepath, sourcefile, size) {
+	# line is [4 put sourcepathfile MD5 size] separated by tabs
+	printf("4\tput\t%s\t%s\t%s\n", sourcepath "/" sourcefile, MD5[1], size ) > "'${TMPS3COMMANDSREQ}'"
+	printf("%s\n", sourcepath "/" sourcefile) > "'${NEWBACKUPS}'"
+	NEWBACKUPSNO++
+	NEWBACKUPSSIZE+= size
+	# update index assuming the operation suceeds
+	for (i=1; i<=COUNT; i++) # update index
+		S3STATUS[i]="1"
+	}
+
+	function recreateoriginal(md5, destp, destf,destrecord) { # create recovery commands data to enable original file structure to be reproduced
+	# here also create recovery commands data to enable original file structure to be reproduced
+	# i.e. copy from base of RECOVERYDIR to subdirectory in copy of original file structure within RECOVERYDIR
+	# make directory first in case not already there
+	touchdate= substr(FILEDATETIME[destrecord],1,8) substr(FILEDATETIME[destrecord],10,4) "." substr(FILEDATETIME[destrecord],14,2)
+	printf("touch -m -t %s %s && mkdir -p %s && mv %s \"%s\"\n", touchdate, "'${RECOVERYDIR}/'" md5,
+	 "'${RECOVERYDIR}'" destp, "'${RECOVERYDIR}/'" md5, "'${RECOVERYDIR}'" destp "/" destf) >> "'${RECOVERYCOMMANDS}'"
+	}
+
+	function indexwarning(message) {
+	printf ("'$(${TIMESTAMP})'| Index warning: %s\n", message) >> "'${WARNLOG}'"
+	}
+	function awkdebug(str) {
+	printf("awkdebug: %s\n", str ) >> "'${DEBUGLOG}'"
+	}
+	' >${NEWINDEXBYMD5}  ${INDEXBYMD5WITHNEWFILES}
+
+	cat ${TMPPROGRESSLOG}
+	addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+
+  if [ -e ${TMPS3COMMANDSREQ} ] ; then
+		#sort command list by command number, so that order is local copy,del(move to trash),get,put
+		# (slowest ones at the end)
+		LC_ALL=C sort ${TMPS3COMMANDSREQ} > ${S3COMMANDSREQ}
+  	TOTALCOMMANDS=$(wc -l < ${S3COMMANDSREQ})
+ 	else
+# 		cat /dev/null > ${S3COMMANDSREQ}  # **********SHOULD NOT NEED THIS
+		TOTALCOMMANDS=0
+  fi
+  REMAININGCOMMANDS=${TOTALCOMMANDS}
+	rm -f ${TMPS3COMMANDSREQ}
+	savestate
+}
+
+#-----------------------------------------------------------------------------------------------
+function listrecovery { # list all recovered files in recovery directory
+  ls -1 ${RECOVERYDIR} | sed 's/.*\/\(.*\)/\1/g' > ${RECOVERYLIST}
+  EXITSTATUS=$?
+  if [ $EXITSTATUS -ne 0 ]; then
+    cat /dev/null > ${TMPRECOVERYCHECK}
+  else
+		gawk ' # reformat file list into checklist format
+		{	printf("%s\tget\n", $1)
+		} ' >${TMPRECOVERYCHECK} ${RECOVERYLIST}
+  fi
+}
+#-----------------------------------------------------------------------------------------------
+function validatecommands { # compare commands with checklist
+	# S3BATCH contains lines in form: <number 1-4 > <operation> <pathfilename> <MD5> <extra info>
+	# fields are tab separated
+	# where <operation> is cp, del, get, put for <number> 1-4
+	# for this purpose cp is same as get (local files are copied to same place as downloads)
+
+	# but not in MD5 order so need to sort
+	LC_ALL=C sort -t$'\t' -k 4 ${S3BATCH} > ${TMPS3COMMANDS1}
+
+	gawk ' BEGIN { FS = "\t"; OFS = "\t" 
+		failed=0
+		checkline = "z"
+		inputnextcheck()
+	}
+	{	if ( $2 == "cp" ) 
+			$2 = "get" # replace cp by get
+		while ( $4 > check[1] )
+			inputnextcheck() # ignore extra check lines found
+		if ( $4 < check[1] || $2 != check[2] ) { # MD5 not matching or operation not matching
+		awkdebug( "validatecommands MD5=" $4 ", operation=" $2 ", check[1]=" check[1] ", check[2]=" check[2])
+			printf("%s\n", $4 ) # need to redo this one
+			printf ("'$(${TIMESTAMP})'| Command failed (will retry): %s %s %s\n",$2, $4, $3) >> "'${ERRLOG}'"
+			printf ("'$(${TIMESTAMP})'| Command failed (will retry): %s %s %s\n",$2, $4, $3) >> "'${PROGRESSLOG}'"
+			failed++
+		}
+		# records filematch here, so command was successful, no need to redo
+		else inputnextcheck()
+	} 
+	END{
+		if ( failed > 0 ) {
+			printf ("'$(${TIMESTAMP})'| %d commands failed\n", failed ) >> "'${ERRLOG}'"
+		}
+	}
+	function inputnextcheck() { # get next checkline
+		if ( getline checkline < "'${S3CHECKLIST}'" <= 0 )
+			checkline = "z" # use this as end of file
+		split(checkline,check) # splits line on FS separator into array check[]
+		# first field is MD5, second field is operation put,get,del
+	}
+	function awkdebug(str) {
+		printf("awkdebug: %s\n", str ) >> "'${DEBUGLOG}'"
+	}
+	' >${TMPREDOS3COMMANDS1} ${TMPS3COMMANDS1}
+}
+#-----------------------------------------------------------------------------------------------
+function audit {
+	# compare s3 files list with index, update s3 status and list missing index records
+	cat /dev/null> ${TMPPROGRESSLOG}
+	gawk '	BEGIN { FS = "\t"; OFS = "\t" 
+	missingindexrecords=0
+	status0to1=0
+	status1to0=0
+	inputnextfile()
+	if ( FOUNDINS3 == "z" )
+		{ indexerror( "Error: nothing in s3 files list\n ... Aborting" )
+		exit }
+	}
+	{ 
+		# test for next in sequence being a file not in index
+		while ( $1 > FOUNDINS3 )  {
+			if ( filematch == 0 )  # file found in s3 missing index record
+				outputmissingindexrecord( FOUNDINS3 )
+			inputnextfile()
+		}
+		if ( $1 == FOUNDINS3 ) { # found file in index, review status and request
+			filematch=1
+			if ( $6 == "0" ) { # update s3 status
+				changes3status($6,"1",$7,"1")
+				status0to1++
+			}
+		}
+		else { # ( $1 is < FOUNDINS3 ) in index but not in s3
+			if ( $6 == "1" ) { # update s3 status
+				changes3status($6,"0",$7,$5)
+				status1to0++
+			}
+		}
+		# output index record  			
+		print
+	}
+	END { 
+		while ( FOUNDINS3 < "z" ) { # write remaining s3 files not in index
+			if ( filematch == 0 )  # file found in s3 missing index record
+				outputmissingindexrecord( FOUNDINS3 )
+			inputnextfile()
+		}
+	if ( missingindexrecords >0 ) {
+		printf ("Audit: extra %d files found in s3 not in index\n",missingindexrecords) >> "'${TMPPROGRESSLOG}'"
+		printf ("Audit: these files are listed in '${RUNSDIR}'/s3missingindexrecords.txt\n") >> "'${TMPPROGRESSLOG}'"
+	}
+	if ( status0to1 > 0 )
+		printf ("Audit: %d files in index with s3status 0 had s3 backup, s3status now changed to 1\n",status0to1) >> "'${TMPPROGRESSLOG}'"
+	if ( status1to0 > 0 )
+		printf ("Audit: %d files in index with s3status 1 had no s3 backup, s3status now changed to 0\n",status1to0) >> "'${TMPPROGRESSLOG}'"
+	if ( status0to1 + status1to0 > 0 )
+		printf ("Audit: for details of above status changes see warnings log\n") >> "'${TMPPROGRESSLOG}'"
+	if ( missingindexrecords + status0to1 + status1to0 == 0 )
+		printf ("Audit: No problems found\n") >> "'${TMPPROGRESSLOG}'"
+	}
+	function inputnextfile() { # get next FOUNDINS3
+	filematch=0 # need to record if filematched before because may be more than one filematching index record
+	if ( getline FOUNDINS3 < "'${S3FILESLIST}'" <= 0 )
+		FOUNDINS3 = "z" # use this as end of file, forces rest of index records to be output
+	}
+	function outputmissingindexrecord( s3file ) {
+		printf ("%s\n", s3file) > "'${MISSINGINDEXRECORDS}'"
+		missingindexrecords++
+	}
+	function indexerror(message) {
+	printf ("'$(${TIMESTAMP})'| Index error: %s\n", message) >> "'${ERRLOG}'"
+	printf ("'$(${TIMESTAMP})'| Index error: %s\n", message)
+	}
+	function changes3status(old6,new6,old7,new7) {
+	$6=new6
+	$7=new7
+	printf ("'$(${TIMESTAMP})'| Index s3 status change: %s -> %s %s %s/%s\n", old6, new6, $1, $8, $9) >> "'${WARNLOG}'"
+	}			
+	' >${NEWINDEXBYMD5}  ${INDEXBYMD5}
+	
+	cat ${TMPPROGRESSLOG}
+	addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+
+}
+#-----------------------------------------------------------------------------------------------
+

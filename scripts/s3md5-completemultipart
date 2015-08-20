@@ -1,0 +1,60 @@
+#!/bin/bash
+# s3md5-completemultipart # completes upload of incomplete multipart uploads -
+# N.B. only possible with s3tools package - awscli does not have this facility
+# 
+
+source ~/s3md5-userparameters # user needs to set these
+source ${S3MD5ROOT}/scripts/sub/s3md5-commandparms # parse command line
+source ${S3MD5ROOT}/scripts/sub/s3md5-declares # keep all variable declarations here for use in all progs
+source ${S3MD5ROOT}/scripts/sub/s3md5-functions # keep all functions here for use in all progs
+
+initialise-index
+
+printf "\n\n\n***************************************************************************\n"
+printf "This script will generate a script with the necessary commands to complete\n"
+printf "... any incomplete multipart uploads\n"
+printf "You may wish to edit the generated script before running it.\n"
+printf "***************************************************************************\n\n"
+
+s3cmd multipart ${S3PRE}${BUCKET} > ${TMPMULTIPARTS1}
+
+sed -e '1,2d' < ${TMPMULTIPARTS1} > ${TMPMULTIPARTS2}
+
+if [ ! -s ${TMPMULTIPARTS2} ] ; then
+	printf "There are no remaining incomplete multiparts\n"
+	exit 1
+fi
+
+printf "This is the list of multipart files:\n"
+cat ${TMPMULTIPARTS2}
+printf "\nEach file will now be presented for possible completion\n"
+
+gawk '
+	BEGIN {
+		printf( "#!/bin/bash\n" ) > "'${MULTICOMPLETIONCMDS}'"
+	}
+	{
+		id = $NF
+		s3filename = ""
+		for ( i=2; i<NF; i++ ) # s3filename may contain spaces
+			s3filename = s3filename $i
+		printf("\nFile: %s  %s\n", s3filename, id )
+#		system("s3cmd listmp " s3filename " " id) # list the parts
+		printf("Do you want to continue to upload this file? (y/n):")
+		getline choice < "/dev/stdin"
+		if ( choice == "y" || choice == "Y" ) {
+			MD5 = s3filename
+			sub("'${BUCKET}'/uploads/","",MD5)
+			cmd = "grep " MD5 " " "'${INDEX}'"
+			cmd | getline item
+			close(cmd)
+			split(item,fields,"\t")
+			localfilename = fields[8] "/" fields[9]
+			printf("The required command will be added to '${MULTICOMPLETIONCMDS}'\n")
+			printf("s3cmd --continue-put --multipart-chunk-size-mb='${MULTIPARTCHUNKSIZEMB}' --upload-id=%s put \"%s\" %s\n", \
+				id , localfilename, s3filename)  > "'${MULTICOMPLETIONCMDS}'"
+		}
+	} ' ${TMPMULTIPARTS2}
+
+exit 0
+

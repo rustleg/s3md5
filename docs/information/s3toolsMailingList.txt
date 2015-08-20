@@ -1,0 +1,10 @@
+S3tools mailing list
+====================
+https://lists.sourceforge.net/lists/listinfo/s3tools-general
+
+To see the collection of prior postings to the list, visit
+  http://sourceforge.net/mailarchive/forum.php?forum_name=s3tools-general
+
+To post a message to all the list members
+  send email to s3tools-general@lists.sourceforge.net.
+

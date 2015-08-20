@@ -1,0 +1,36 @@
+#!/bin/bash
+# s3md5-auditindex
+#
+
+#-----------------------------------------------------------------------------------------------
+#set -x #shows commands being executed on the terminal for debugging purposes
+
+source ~/s3md5-userparameters # user needs to set these
+source ${S3MD5ROOT}/scripts/sub/s3md5-commandparms # parse command line
+source ${S3MD5ROOT}/scripts/sub/s3md5-declares # keep all variable declarations here for use in all progs
+source ${S3MD5ROOT}/scripts/sub/s3md5-functions # keep all functions here for use in most progs
+source ${S3MD5ROOT}/scripts/sub/s3md5-fns-${CLIENT} # all functions which depend on external s3 client command line package are here
+
+# first check to avoid running a second instance
+if [ ! -d ${ISRUNNINGDIRECTORY} ]; then
+	mkdir ${ISRUNNINGDIRECTORY}
+else
+	printf "Another s3md5 program is already running - abort\n"
+	exit 1
+fi
+
+initialise
+
+
+#sort index in MD5 order
+LC_ALL=C sort ${INDEX} >${INDEXBYMD5}
+listfilesbucket # will already be in MD5 order
+
+audit
+storeindex
+
+# set +x
+rmdir ${ISRUNNINGDIRECTORY}
+exit 0
+
+

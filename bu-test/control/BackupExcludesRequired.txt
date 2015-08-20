@@ -1,0 +1,26 @@
+.*/\.
+/$recycle.bin
+/$RECYCLE.BIN
+System Volume Information
+lost+found
+torrents
+/.{0,1}(C|c)ache
+Thumbs.db
+google-chrome
+SpiderOak*
+desktop.ini
+.*~
+.*\.bak
+(D|d)ownloads
+*.wmv
+*.mp4
+*.mkv
+
+s3md5BackupSystem.*/bu-
+/mnt/dataNAS/iTunesMedia
+/mnt/dataNAS/Videos
+/SummerSeason/
+/BackupClones/
+spideroak_5.1.3_amd64.deb
+Windows7Unleashed_SamsPublishing.pdf
+

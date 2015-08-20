@@ -1,0 +1,9 @@
+#!/bin/bash
+# s3md5-storescripts - updates stored scripts and docs on s3
+#
+
+#-----------------------------------------------------------------------------------------------
+#set -x #shows commands being executed on the terminal for debugging purposes
+
+cd /data/s3md5BackupSystem
+s3cmd -r --exclude=bu-* --exclude=*~ sync . s3://xxxxxxxxx-backupsoftware/

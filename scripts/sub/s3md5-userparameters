@@ -1,0 +1,45 @@
+#!/bin/bash
+# s3md5-userparms - user needs to set these before using the system
+#
+# sourced in main progs
+# 
+
+declare S3MD5ROOT=/data/s3md5BackupSystem # location of this system
+
+readonly S3PRE=s3://myuniqueprefix- # useful in case you use several buckets all with the same front-end name
+
+declare BUCKET=datanas  # your default bucket if not specified on the command line
+
+readonly TMPDIR=/tmp/myscriptstemp/s3backup #  temporary working files, no need to retain after run
+
+declare ENCRYPT=Y # require files to be encrypted (AES256 used) in s3: Y or N
+readonly AESKEYFILE=~/s3md5aeskey # passphrase
+
+readonly BATCHLIMITNUMBER=100 # controls how many uploads per batch, if no limit required set = 0
+readonly BATCHLIMITMB=1000 # controls how much MB is uploaded per batch, if no limit required set = 0
+# note the batch will always just exceed the batch limit MB by the last file's excess size
+
+readonly RETRYLIMIT=2 # aborts if more than this number of passes required to do updates
+# note the backups will still be attempted next time after an abort
+
+readonly MULTIPARTCHUNKSIZEMB=8 # only used for completing failed multipart files
+# i.e. files big enough to be uploaded in parts
+# see script s3md5-completemultipart
+# do not change it unless you really want to
+
+readonly USEZENITY=true # Zenity is an app which puts a small notice on the screen
+
+# all functions which depend on external s3 client command line are in a separate file
+# CLIENT needs to be either "awscli" or "s3tools" - currently prefer awscli
+readonly CLIENT=s3tools
+#readonly CLIENT=awscli
+
+# N.B. --------------specify what to back up in these 2 files (in the control subdirectory: 
+# BackupRootsRequired.txt # BACKUPROOTS are directories to back up
+# BackupExcludesRequired.txt # paths or filenames to exclude
+# see script "testexclusions" - highly recommend using this to test the regexes you set up before running backups
+# ... it creates a list of the excluded files: BackupExcluded.txt
+# ... check it to make sure your regular expressions are working
+
+
+

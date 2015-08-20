@@ -1,0 +1,20 @@
+#!/bin/bash
+# s3md5-testexclusions
+#
+# egrep regular expressions are used in EXCLUDES file
+# use this program to check regular expressions are producing the desired results
+#
+# run, then examine s3md5BackupExluded.txt
+
+source ~/s3md5-userparameters # user needs to set these
+source ${S3MD5ROOT}/scripts/sub/s3md5-commandparms # parse command line
+source ${S3MD5ROOT}/scripts/sub/s3md5-declares # keep all variable declarations here for use in all progs
+source ${S3MD5ROOT}/scripts/sub/s3md5-functions # keep all functions here for use in all progs
+
+initialise
+readstate
+readbackuproots
+
+exit 0
+
+

@@ -1,0 +1,122 @@
+#!/bin/bash
+# s3md5-declares - sourced in main progs
+#
+
+shopt -s -o nounset
+
+#set -x #shows commands being executed on the terminal for debugging purposes
+
+declare TIMESTAMP='date +%Y-%m-%d-%H%M%S'
+declare DATESTAMP=$(date +%Y-%m-%d)
+declare TODAYYR=$(date +%Y)
+declare TODAYMTH=$(date +%m)
+declare TODAYDAY=$(date +%d)
+declare TODAYNODASHES=${TODAYYR}${TODAYMTH}${TODAYDAY}
+
+readonly CONTROLDIR=${S3MD5ROOT}/bu-${BUCKET}/control # main backup directory
+readonly RUNSDIR=${S3MD5ROOT}/bu-${BUCKET}/runfiles # files created by running
+readonly LOGSDIR=${S3MD5ROOT}/bu-${BUCKET}/logs # errors, warnings, progress, s3output
+readonly INDEXDIR=${S3MD5ROOT}/bu-${BUCKET}/index # index archives
+readonly RECOVERYDIR=${S3MD5ROOT}/bu-${BUCKET}/recovery # all recovered files will be stored here
+
+# --------------specify what to back up in these 2 files:
+readonly BACKUPROOTS=${CONTROLDIR}/BackupRootsRequired.txt # BACKUPROOTS are directories to back up
+# N.B. see script "s3md5-testexclusions" - highly recommend using this to test the regexes you set up before running backups
+readonly EXCLUDES=${CONTROLDIR}/BackupExcludesRequired.txt # paths or filenames to exclude
+
+# this file is created by "s3md5-testexclusions" script - check it to make sure your regular expressions are working
+readonly EXCLUDEDFILES=${CONTROLDIR}/BackupExcluded.txt # filenames excluded 
+
+# set up temporary directory for working files
+mkdir -p "${TMPDIR}"
+#if [ ! -d "${TMPDIR}" ]; then mkdir -p "${TMPDIR}" ; fi
+
+readonly STOPFILE=${TMPDIR}/STOP # used to abort a run
+
+readonly FILESBUCKETFOLDER=${S3PRE}${BUCKET}/files
+readonly INDEXBUCKETFOLDER=${S3PRE}${BUCKET}/index
+readonly DELETESBUCKETFOLDER=${S3PRE}${BUCKET}/deletes
+readonly TRASHBUCKETFOLDER=${S3PRE}${BUCKET}/trash
+readonly UPLOADSBUCKETFOLDER=${S3PRE}${BUCKET}/uploads
+
+readonly CMDSCRIPT=${RUNSDIR}/cmdscript.sh
+readonly DELETESLIST=${RUNSDIR}/s3deleteslist.txt
+readonly MISSINGINDEXRECORDS=${RUNSDIR}/s3missingindexrecords.txt
+readonly MULTICOMPLETIONCMDS=${RUNSDIR}/MultipartCompletionCommands.txt
+readonly NEWBACKUPS=${RUNSDIR}/newbackups.txt # list of new files backed up
+readonly S3BATCH=${RUNSDIR}/s3batch.txt # working file of s3 commands, as above except may be limited by batch limits
+readonly S3COMMANDSREQ=${RUNSDIR}/s3commandsreq.txt # required s3 commands
+readonly S3FILESLIST=${RUNSDIR}/s3fileslist.txt
+readonly STATEFILE=${RUNSDIR}/state.txt # this saves state in case prog is aborted
+
+readonly PROGRESSLOG=${LOGSDIR}/${DATESTAMP}-progress.log # shows program progress, one log per day
+readonly ERRLOG=${LOGSDIR}/${DATESTAMP}-errors.log # errors, one log per day
+readonly S3LOG=${LOGSDIR}/${DATESTAMP}-s3log.log # output from s3, one log per day
+readonly WARNLOG=${LOGSDIR}/${DATESTAMP}-warnings.log # errors, one log per day
+
+# ------------- TEMPORARY STORAGE ----------
+readonly ARCHIVELIST=${TMPDIR}/indexarchivelist.txt
+readonly DEBUGLOG=${TMPDIR}/debug.log
+readonly ENCGETFILES=${TMPDIR}/eget # encrypted files stored here just after download
+readonly ENCPUTFILES=${TMPDIR}/eput # encrypted files stored here just before upload
+readonly FILELISTBYPATH=${TMPDIR}/filelistbypath.txt # requested files, not already in index
+readonly FILELISTREQ=${TMPDIR}/filelistreq.txt # requested files
+readonly FILELISTUREQ=${TMPDIR}/filelistuniquereq.txt # requested files, removing duplicates
+readonly INDEXBYMD5=${TMPDIR}/indexbyMD5.tsv
+readonly INDEXBYMD5WITHNEWFILES=${TMPDIR}/indexbyMD5withnewfiles.tsv
+readonly INDEXBYPATH=${TMPDIR}/indexbypath.tsv
+readonly INDEXBYPATHWITHNEWFILES=${TMPDIR}/indexbypathwithnewfiles.tsv
+readonly INDEX=${TMPDIR}/s3md5ix.tsv
+readonly ISRUNNINGDIRECTORY=${TMPDIR}/s3md5bu.isrunning # lock file (directory) to avoid running a second instance
+readonly NEWINDEXBYMD5=${TMPDIR}/newindexbyMD5.tsv
+readonly NEWINDEXBYPATH=${TMPDIR}/newindexbypath.tsv
+readonly RECOVERYCOMMANDS=${TMPDIR}/recoverycommands.txt # file of recovery commands to make into a script
+readonly RECOVERYLIST=${TMPDIR}/recoverylist.txt
+readonly RECOVERYSCRIPT=${TMPDIR}/recoveryscript
+readonly S3CHECKLIST=${TMPDIR}/s3checklist.txt
+readonly S3DEFERRED=${TMPDIR}/s3deferred.txt
+readonly TMPCMDSCRIPT=${TMPDIR}/tmpcmdscript.sh
+readonly TMPDELETESCHECK=${TMPDIR}/tmp-deletescheck.txt
+readonly TMPERRLOG=${TMPDIR}/tmp-errors.log # errors, one log per day
+readonly TMPEXCLUDES=${TMPDIR}/tmp-excludes.txt
+readonly TMPLISTREQ1=${TMPDIR}/tmp-listreq1.txt
+readonly TMPLISTREQ2=${TMPDIR}/tmp-listreq2.txt
+readonly TMPMULTIPARTS1=${TMPDIR}/tmp-s3multiparts1.txt
+readonly TMPMULTIPARTS2=${TMPDIR}/tmp-s3multiparts2.txt
+readonly TMPPROGRESSLOG=${TMPDIR}/tmp-progresslog.log # output from s3, one log per day
+readonly TMPRECOVERYCHECK=${TMPDIR}/tmp-recoverycheck.txt
+readonly TMPREDOS3COMMANDS1=${TMPDIR}/tmp-redos3commands1.txt
+readonly TMPREDOS3COMMANDS2=${TMPDIR}/tmp-redos3commands2.txt
+readonly TMPS3COMMANDS1=${TMPDIR}/tmp-s3commands1.txt
+readonly TMPS3COMMANDS2=${TMPDIR}/tmp-s3commands2.txt
+readonly TMPS3COMMANDSREQ=${TMPDIR}/tmp-s3commandsreq.txt
+readonly TMPS3FILESLIST=${TMPDIR}/tmp-s3fileslist.txt
+readonly TMPS3LOG=${TMPDIR}/tmp-s3log.log # output from s3, one log per day
+readonly TMPUPLOADSCHECK=${TMPDIR}/tmp-uploadscheck.txt
+readonly UPLOADSLIST=${TMPDIR}/s3uploadslist.txt
+
+# state file contains these values (note true and false are only strings)
+declare UPLOADSATTEMPTED=true
+declare DELETESATTEMPTED=true
+declare -i TOTALCOMMANDS=0
+declare -i REMAININGCOMMANDS=0
+declare -i RETRYCOUNT=0
+
+readonly TAB=$(echo -e "\t")
+
+declare ARCHIVEDINDEX
+declare CMD
+declare DIRNAME
+declare EXITSTATUS
+declare FDATE
+declare FILENAME
+declare FINISHED
+declare FSIZE
+declare FTIME
+declare LATESTARCHIVE
+declare MD5
+declare PATHNAME
+declare SPLITEXTENSION
+declare SPLITFILENAM
+declare STATSTRING
+

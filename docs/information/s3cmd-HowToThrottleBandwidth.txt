@@ -1,0 +1,30 @@
+How to throttle bandwidth in s3cmd
+==================================
+
+On Linux you can throttle bandwidth using the throttle command line program, e.g.
+
+cat mybigfile | throttle -k 512 | s3cmd put - s3://mybucket/mybigfile 
+
+which would limit reads from mybigfile to be 512kbps. 
+
+Throttle is available by apt-get or yum in all the major Linux distributions.
+
+
+Alternatively, the utility trickle can be used:
+
+trickle -d 250 s3cmd get... would limit the download rate of s3cmd to 250 kilobytes per second.
+
+trickle -u 250 s3cmd put... would limit the upload rate of s3cmd to 250 kilobytes per second.
+
+Trickle is a yum or apt-get install if you're on a Fedora or Debian/Ubuntu machine. You must have the libevent library (Trickle's only dependency) already installed before you install Trickle. Most modern distribution will already have this installed.
+On Windows, the throttle or trickle utilities are not available, but if you are using S3Express instead of s3cmd, you can limit max bandwidth simply by using the flag -maxb of the PUT command.
+
+
+User Comments
+Pasiek -  27 May 2014
+
+If you get: 
+<<trickle: Could not reach trickled, working independently: No such file or directory>>
+add -s to command line, for example:
+trickle -s -u 350 s3cmd put file.omg s3://BUCKET
+-s runs trickle in standalone mode independent of trickled.

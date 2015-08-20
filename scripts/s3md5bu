@@ -1,0 +1,203 @@
+#!/bin/bash
+# s3md5bu - Russell's s3 backup program
+#
+# uses s3cmd from s3tools.org to talk to Amazon s3
+
+
+#-----------------------------------------------------------------------------------------------
+# set -x #shows commands being executed on the terminal for debugging purposes
+
+source ~/s3md5-userparameters # user needs to set these
+source ${S3MD5ROOT}/scripts/sub/s3md5-commandparms # parse command line
+source ${S3MD5ROOT}/scripts/sub/s3md5-declares # keep all variable declarations here for use in all progs
+source ${S3MD5ROOT}/scripts/sub/s3md5-functions # keep all functions here for use in all progs
+source ${S3MD5ROOT}/scripts/sub/s3md5-fns-${CLIENT} # all functions which depend on external s3 client command line package are here
+
+# first check to avoid running a second instance
+if [ ! -d ${ISRUNNINGDIRECTORY} ]; then
+	mkdir ${ISRUNNINGDIRECTORY}
+else
+	printf "Program is already running - this second instance will now abort.\n"
+	zenity --warning --title="Program is already running" --text="this second instance aborted" --no-wrap --display=:0.0
+	exit 1
+fi
+
+printf "**************** s3md5 Backup System *******************\n"
+
+
+initialise
+readstate
+
+if [ ! -e ${BACKUPROOTS} ] ; then
+  printf "Backup failed - No backup roots file\n${BACKUPROOTS}\n ... Aborting.\n" 1>&2
+	if [ "${USEZENITY}" = true ]; then
+		zenity --warning --title="s3md5 Backup failed" --text="No backup roots file" --no-wrap --display=:0.0
+	fi
+	rmdir ${ISRUNNINGDIRECTORY}
+  exit 1
+fi
+
+if [ "${REMAININGCOMMANDS}" -gt 0 ] || [ -e ${S3COMMANDSREQ} ]  || [ -e ${S3BATCH} ]; then 
+	printf " Restarting incomplete previous run ...\n"
+fi
+
+#  bashdebug "readstate1: UPLOADSATTEMPTED:${UPLOADSATTEMPTED} DELETESATTEMPTED:${DELETESATTEMPTED} TOTALCOMMANDS=${TOTALCOMMANDS} REMAININGCOMMANDS=${REMAININGCOMMANDS} RETRYCOUNT=${RETRYCOUNT}"
+
+RETRYCOUNT=0
+savestate
+FINISHED=false
+
+while [ "${FINISHED}" = false ]
+do
+	if [ "${REMAININGCOMMANDS}" -gt 0 ] || [ -e ${S3COMMANDSREQ} ]  || [ -e ${S3BATCH} ] ; then 
+		if [ ! -e ${S3BATCH} ] ; then # set up new S3BATCH from S3COMMANDSREQ
+			if (( ( BATCHLIMITNUMBER > 0 ) || ( BATCHLIMITMB > 0 ) )) ; then
+				limits3commands # produces file S3BATCH with remaining commands in S3COMMANDSREQ
+			else
+				mv ${S3COMMANDSREQ} ${S3BATCH} # so S3COMMANDSREQ no longer exists
+			fi
+			TOTALCOMMANDS=$(wc -l < ${S3BATCH})
+			REMAININGCOMMANDS=${TOTALCOMMANDS}
+			savestate
+		fi
+	
+		printf "processing %d commands\n" ${REMAININGCOMMANDS} | tee ${TMPPROGRESSLOG}
+		addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+		
+		# find if there are any uploads
+		if (( $(grep -c "put${TAB}" ${S3BATCH}) > 0 )); then 
+			UPLOADSATTEMPTED=true
+		else
+			UPLOADSATTEMPTED=false
+		fi  	
+
+		# find if there are any deletes
+		if (( $(grep -c "del${TAB}" ${S3BATCH}) > 0 )); then 
+			DELETESATTEMPTED=true
+		else
+			DELETESATTEMPTED=false
+		fi  	
+		savestate
+
+		# for debugging
+		#cp ${S3BATCH} ${TMPDIR}/s3batch-copy$(date +%Y-%m-%d-%H%M%S).txt
+	 
+		# need to extract REMAININGCOMMANDS if < TOTALCOMMANDS 
+		if (( ${REMAININGCOMMANDS} < ${TOTALCOMMANDS} )) ; then
+			tail --lines=${REMAININGCOMMANDS} ${S3BATCH} >${TMPS3COMMANDS2}
+		else
+			cp ${S3BATCH} ${TMPS3COMMANDS2}
+		fi
+		
+		createscript  # produces final set of commands
+
+		# for debugging
+		#cp ${CMDSCRIPT} ${TMPDIR}/cmdscript-copy$(date +%Y-%m-%d-%H%M%S).txt
+
+		# run the commands which includes encryption, logging and state update
+		# N.B. should not need to use chmod +x to allow execution as files owned by me
+		source ${CMDSCRIPT}
+
+		# check that all uploads, deletes and downloads were successful
+		
+		if [ "${UPLOADSATTEMPTED}" = true ]; then
+		  listuploadsbucket # in form: MD5 tab <operation>
+	  else
+	  	cat /dev/null > ${TMPUPLOADSCHECK}
+		fi
+		if [ "${DELETESATTEMPTED}" = true ]; then
+		  listdeletesbucket # in form: MD5 tab <operation>
+	  else
+	  	cat /dev/null > ${TMPDELETESCHECK}
+		fi
+		
+	  listrecovery # list all recovered files in recovery directory - in form: MD5 tab <operation>
+	  
+	  # concatenate recovery, uploads and trash lists and sort into MD5 order
+		LC_ALL=C sort ${TMPUPLOADSCHECK} ${TMPDELETESCHECK} ${TMPRECOVERYCHECK} > ${S3CHECKLIST}
+	
+		printf "validating commands\n" | tee ${TMPPROGRESSLOG}
+		addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+	
+		validatecommands # compare S3CHECKLIST with S3BATCH, list failed MD5s in TMPREDOS3COMMANDS1
+		# use grep to find commands that failed
+		grep -f ${TMPREDOS3COMMANDS1} ${S3BATCH} > ${TMPREDOS3COMMANDS2}
+		# put the failed ones back in S3BATCH for next pass
+		cp ${TMPREDOS3COMMANDS2} ${S3BATCH}
+		TOTALCOMMANDS=$(wc -l < ${S3BATCH})
+		REMAININGCOMMANDS=${TOTALCOMMANDS}
+	
+	  # if all ok move upload bucket into file bucket and deletes bucket into trashbucket
+	  if (( REMAININGCOMMANDS == 0 )) ; then
+			printf "All commands successful\n" | tee ${TMPPROGRESSLOG}
+			addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+		  RETRYCOUNT=0
+			UPLOADSATTEMPTED=false
+			DELETESATTEMPTED=false
+		  savestate
+		  # clean up
+		  rm ${S3BATCH} # then next iteration will need to recreate it from S3COMMANDSREQ
+	  	emptytmpbuckets
+	  	rm -f ${ENCGETFILES}/*
+	   	rm -f ${ENCPUTFILES}/* 
+	   	# recreate original folder structure within recovery directory and copy files there
+		  if (( $(wc -l < ${TMPRECOVERYCHECK}) > 0 )) ; then 
+		  	echo "#!/bin/bash" > ${RECOVERYSCRIPT}
+		  	cat ${RECOVERYCOMMANDS} >> ${RECOVERYSCRIPT}
+		  	source ${RECOVERYSCRIPT}
+		  	rm -f ${RECOVERYCOMMANDS}
+		  fi
+	  else
+	  	(( RETRYCOUNT++ ))
+		  savestate
+	  fi
+		# end of check that all uploads, deletes and downloads were successful
+	
+		if (( ${RETRYCOUNT} > ${RETRYLIMIT} )); then
+			printf "Too many commands failed - exceeded retry limit (${RETRYLIMIT}), aborting.\n"  > ${TMPERRLOG}
+			addtimestamplog ${TMPERRLOG} ${ERRLOG}
+			printf "Too many commands failed - exceeded retry limit (${RETRYLIMIT}), aborting.\n"  | tee ${TMPPROGRESSLOG}
+			addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+			if [ "${USEZENITY}" = true ]; then
+				zenity --warning --title="s3md5 Backup failed" --text="Too many commands failed - exceeded retry limit" --no-wrap --display=:0.0
+			fi
+			rmdir ${ISRUNNINGDIRECTORY}
+			exit 1
+		elif (( ${RETRYCOUNT} > 0 )); then
+			printf "%d commands failed - retry\n" ${REMAININGCOMMANDS} | tee ${TMPPROGRESSLOG}
+			addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+		fi
+	
+		if [ "${REMAININGCOMMANDS}" -eq 0 ] && [ -e ${S3COMMANDSREQ} ] ; then # some commands were deferred due to batch limit
+			TOTALCOMMANDS=$(wc -l < ${S3COMMANDSREQ})
+			REMAININGCOMMANDS=${TOTALCOMMANDS}
+			savestate
+		fi
+		
+		checkforabortreq
+		
+	fi # end of if [ "${REMAININGCOMMANDS}" -gt 0 ] || [ -e ${S3COMMANDSREQ} ]  || [ -e ${S3BATCH} ]
+		
+  if (( REMAININGCOMMANDS == 0 )) ; then # only look for new files if all current work done
+		#update index from file system, create new commands and archive index if it changed
+		printf "update index from file system\n"  | tee ${TMPPROGRESSLOG}
+		addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+		updateindex # creates S3COMMANDSREQ also sets counts in STATEFILE
+		if (( ${REMAININGCOMMANDS} == 0 )) ; then 
+			printf "finished\n" | tee ${TMPPROGRESSLOG}
+			if [ "${USEZENITY}" = true ]; then
+				zenity --info --title="s3md5 Backup" --text="   Completed    " --display=:0.0
+			fi
+		  FINISHED=true
+		else
+			printf "generated %d s3 commands\n"  ${REMAININGCOMMANDS} | tee ${TMPPROGRESSLOG}
+		fi
+		addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
+	fi
+done
+
+# set +x
+rmdir ${ISRUNNINGDIRECTORY}
+exit 0
+
+

@@ -1,0 +1,12 @@
+#!/bin/bash
+# 
+# creates STOP file to stop s3md5bu after current upload finishes
+
+source ~/s3md5-userparameters # user needs to set these
+source ${S3MD5ROOT}/scripts/sub/s3md5-commandparms # parse command line
+source ${S3MD5ROOT}/scripts/sub/s3md5-declares # keep all variable declarations here for use in all progs
+
+touch ${STOPFILE}
+
+exit 0
+
