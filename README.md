@@ -13,5 +13,3 @@ The index is a text file list with tab separated fields which will load into a s
 
 
 *(I haven't used GitHub before - I am putting this application up to see if anyone might be interested in it)*
-
-**** TO BE COMPLETED ****
