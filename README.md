@@ -11,5 +11,3 @@ No files are ever deleted at s3 unless specifically requested, so all historic c
 
 The index is a text file list with tab separated fields which will load into a spreadsheet or text editor. The scripts handle normal maintenance of the index, but for the rare occasions when you need to recover files or want to delete backups you will need to edit the request status in the index entry for the relevant file. Using a spreadsheet can make finding and editing multiple files easy.
 
-
-*(I haven't used GitHub before - I am putting this application up to see if anyone might be interested in it)*
