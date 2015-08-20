@@ -1,0 +1,115 @@
+s3md5 Backup System Usage
+=========================
+
+Local Setup
+===========
+Create the following folder heirarchy where you want to locate the scripts, indexes and supporting files.
+mys3md5BackupSystem (or whatever)
+	bu-<bucket1>
+		control
+		index
+		logs
+		recovery
+		runfiles
+	bu-<bucket2> ... (same subfolders)
+	docs
+	scripts
+		sub
+
+docs are whatever documentation you want to put there
+scripts and sub must contain the set of scripts supplied
+control must contain:
+	BackupRootsRequired.txt - one line per folder to back up - e.g. /home/user or /mnt/nas/data. You could start with a small part of your file structure to get the backup going and then include more folders later. The folders you specify may overlap but this won't create duplicate backups. If you later remove a folder it won't remove the entries from the index file or the backups.
+	BackupExcludesRequired.txt - one line per pattern to exclude. This can be a path, part of a path or a complete path/file, etc. It will be used to match the path/files specified in the BackupRoots file using egrep type regular expressions. After specifying the patterns you should run the s3md5-testexclusions script to produce a list of the files it will exclude (BackupExcluded.txt in this folder) so you can be sure the expressions are working as you intend.
+
+Edit the script "s3md5-userparameters" which is the first script to get invoked by the backup. This is to specify your directories, and the name of your default s3 bucket. Also a few optional parameters as explained there. Place or copy this script in to your home folder (I keep it in the scripts/sub folder and put a soft link in home). I also use the home folder to contain my AES plain text key file; some users may want to alter the scripts to secure this properly within their system.
+
+s3 Setup
+========
+Use the s3 console in a browser to set up the appropriate buckets and subfolders. Don't turn on Amazon s3 versioning.
+
+Bucket names have to be all lowercase (Amazon rule) - my system assumes you have a unique prefix to bucket names as all s3 buckets for all customers reside in the same namespace, so your bucket names must not clash with someone else's. Example buckets are as follows - one for a copy of the scripts, docs,etc and 3 separate backup buckets:
+	myuniquename-backupsoftware
+	myuniquename-data
+	myuniquename-music
+	myuniquename-test
+
+Bucket myuniquename-backupsoftware. (This is optional but recommended) - all scripts, etc, including s3tools or other packages, plus documentation. You must upload this stuff yourself manually. Easily done with the s3 console. If your PC goes up in smoke, you have the software and files to recover everything if you have access to your s3 credentials somewhere.
+
+The other buckets are for the backups, you must have at least one, in this example there are  3. Within each bucket create 5 empty folders:
+	deletes - temporary area for files being deleted - these are transferred to trash folder after all deletes are confirmed
+  files - the actual backup files, no subdirectories
+  index - every revised index will be backed up here, so history will be available in case latest ones are corrupt
+    each index will be timestamped. Also (pseudo) subfolders are used e.g. myuniquename-datanas/index/2015/07/04/s3md5ix-datanas-2015-07-04-214629.tsv so you can delete a group of them easily in the s3 console by deleting the higher level folder
+  trash - deleted files, the original path is appended to the md5 name but with slashes replaced with dashes
+  uploads - temporary area for files being uploaded - transferred to files folder after all uploads confirmed
+
+Running
+=======
+The main backup script is s3md5bu. Run this in a terminal, set it to run using cron, or use a launcher from an icon on the desktop (my personal preference). Once you have set things up as above there is nothing more to do except to run this when you want to refresh your backup.
+
+There are 2 optional parameters (bucket and throttle) as in this example:
+$ s3md5bu --bucket mybucket2 --throttle 80
+-b or --bucket : mybucket2 is a non-default bucket, so you can use several different buckets (each must have its own set of local folders such as bu-mybucket2, see above, and the appropriate subfolders in s3). The default bucket is specified in s3md5-userparameters.
+-t or --throttle: 80 is an upload speed limit in KB/sec. My system typically will upload at around 130 KB/sec but this will mostly hog all bandwidth, so I tend to use about 2/3 of the max speed.
+
+STOP file
+=========
+There are 2 ways to abort a backup. If you are using s3tools as your client, you can press Ctrl-C to stop the script. This will probably leave a partially uploaded file in s3 which will not be visible with the s3 console (but can be removed using s3tools). A better way is to allow the current upload to complete by creating a file named STOP (may be empty) in the temporary directory (there is a small script s3md5-stop which will create this file for you). As soon as the current upload is completed this will stop the main backup script (and then delete the stop file to allow restarting). To resume just restart s3md5bu. This will resume where it left off without rescanning the file system or checking the index.
+
+Index
+=====
+The index is a tab separated text file, one line per backed up file (including files deleted) - see backup design for specification. Tabs are used rather than commas because file names may contain commas.
+
+All indexes are named with a timestamp (example s3md5ix-mydatabucket-2015-05-24-110231.tsv) and stored in the local index folder. Only the latest index is needed so when they start to mount up you may want to delete old versions. When a new index is created it is automatically uploaded to s3 in your bucket's index folder.
+
+Eventually there will be a lot to delete so you might want to delete many at once. There are 2 ways:
+1. Issue a delete command using s3tools (but it seems not AWS CLI) as in the following example which will delete all those dated in March 2015. Obviously you can specify more or less granularity as required.
+$ s3cmd rm --recursive s3://mybucket/index/2015/03
+It would perhaps be comforting to test this first with a list command like so:
+$ s3cmd ls --recursive s3://mybucket/index/2015/03
+2. Use the s3 console
+
+Restoring files
+===============
+Files are restored by altering the "request" status in the current index to 2 using a text editor or spreadsheet. Make sure when saving the index manually that the tabs between fields are preserved by the program used.
+
+When the backup is run the downloads will be processed before the uploads. The files will be downloaded, decrypted, renamed with the original name and parent folders recreated according to the original path. This will not overwrite the original path/file but will be found within (example) ...mys3md5BackupSystem/bu-music/recovery. After the run you can move or copy the file(s) or containing parent folder to where you need it and then delete whatever remains in the recovery folder.
+
+Deleting backups
+================
+Backups are deleted by altering the "request" status in the current index to 0 using a text editor or spreadsheet. Make sure when saving the index manually that the tabs between fields are preserved by the program used.
+
+When the backup is run the deletes will be processed before the uploads. Backup files will not actually be deleted but will be moved to the trash folder within s3. The name will be changed to for example: .../trash/2015-08-11-f26f9a8fe9cf9607927300bcbbd57ed0-mnt-data-clubData-Leagues-Triples.xlsm
+You can see that the slashes in the path are replaced by dashes. This enables you to look at the trash folder and know where the file has come from giving you a clue to whether to permanently delete it or possibly rescue it, as from time to time you will probably want to clear the trash.
+
+If a file has a delete request but the same file is still somewhere else in the file system, the backup will not be deleted. You would have to find and mark for deletion all instances of a file before the system deletes the s3 backup.
+
+Index Audit
+===========
+The script s3md5-auditindex checks the index against the files stored in s3, changes the status where it is wrong and reports discrepancies.
+
+Other scripts
+=============
+There are a few other utility scripts:
+	s3md5-totalvolume
+		prints volume of storage used at s3 (according to the indexes)
+	s3md5-abortmultipart
+		shows incomplete multipart uploads and offers to remove all parts
+	s3md5-completemultipart
+		completes upload of incomplete multipart uploads
+	s3md5-storescripts
+		updates stored scripts and docs on s3 (run from scripts folder)
+	s3md5-testexclusions
+		egrep regular expressions are used in EXCLUDES file
+		use this program to check regular expressions are producing the desired results
+		run, then examine s3md5BackupExluded.txt		
+
+Logs
+====
+See the logs folder for various date stamped logs including errors and warnings.
+
+What next?
+==========
+Once you have the backup script running and all your files backed up, from time to time you will want to do some housekeeping by modifying the index and possibly deleting old indexes and trash in s3. I might write other scripts when I come up with maintenance operations which could use some automation. I guess someone might want to write a GUI wrapper, but I will not be doing this myself.
+

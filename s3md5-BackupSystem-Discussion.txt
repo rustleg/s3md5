@@ -1,0 +1,60 @@
+s3md5 Backup System Discussion
+==============================
+
+Summary
+=======
+This is a set of Bash (and Awk) scripts run under Linux which back up user files to Amazon's s3 service. It uses the s3tools package or Amazon's official open source package AWS CLI to do the uploads, downloads and listings.
+
+Most backup systems sync your folder structure to the backup service. Instead this system will back up all files into a single s3 folder (Amazon call this a Prefix) by changing the file name to a 32 character string equal to the file's MD5 hash and ignoring the source folder.
+
+It maintains an index to relate the original path/file/timestamp to the backed up file. The index is a text file list with tab separated fields which will load into a spreadsheet or text editor.
+
+No files are ever deleted at s3 unless specifically requested, so all historic copies can be retrieved (thwarts Cryptolocker). Versioning in s3 is not required as the MD5 changes when the file is changed. Different versions are identified by the path/file/timestamp in the index.
+
+Operation
+=========
+
+It can be run simply in a terminal, or use a launcher from an icon on the desktop (my personal preference). Regular runs can be set up using cron. Updates can be done in the foreground or background as they require no user interaction.
+
+Restoring files from backup require some effort in locating the file(s) in the index and setting a field value to tell the system you want the file downloaded. The file(s) will be downloaded into a separate area and the original folder structure reconstructed. It should be simple for most users who are capable of basic tasks in Linux, to manipulate the relevant index entries using a text editor or spreadsheet. It is my experience that file restoration is a rare event so a little effort without needing sophisticated GUI tools etc is justified.
+
+For those who worry about 2 different files having the same MD5 hash, a little googling should put your mind at rest.
+
+Who could use this
+==================
+You need to be running Linux. Some rudimentary knowledge is expected, such as how to run scripts, to specify regular expressions for file/folder exclusion, to manipulate a text file or spreadsheet. No knowledge of Bash or Awk is required unless you want to modify the scripts.
+
+Why?
+====
+I developed this for two main reasons:
+1. I want to be able to rename files/folders and reorganise my file structure from time to time without requiring the files to be re-uploaded. I did use SpiderOak at one time which has the same feature, but I had issues with it which their developers did not address. (Of course they are more focussed on Windows.)
+2. I don't want to depend on the whims of commercial developers who are always under pressure to add new "features". I prefer to be in control. It does depend currently on using s3tools or the AWS CLI but only uses a few of their basic commands. 
+
+I have a high regard for s3 in terms of reliability and you pay only for what you store. Some commercial storage services subcontract to s3 - Dropbox a prime example.
+
+Other features:
+1. Control is via a simple text file index, only needing a text editor or spreadsheet to manipulate on the rare occasions this is necessary (restoring files or deleting old versions)
+2. You don't need versioning turned on at s3. Finding older versions using the index is simple.
+3. Only one copy of any file is stored, avoiding redundant multiple backups.
+4. If you want to restore a file which happens to also be somewhere else in your file system (but you forget where) it will automatically locate and perform a local copy instead of downloading from s3.
+5. If you copy a file or "touch" it to change the timestamp it isn't re-uploaded.
+6. If you delete a backed up file it is not deleted from the remote backup.
+7. You can specify which folders to back up using a text file of paths. If the paths overlap it won't cause a problem or duplicate anything.
+8. File/folder exclusions can be excluded by specifying a list of egrep-style regular expressions. There is a script to test your expressions which produces a list of the files to be excluded so you can make sure your expression works as you intend.
+9. Backups are validated by the script and any which didn't work are redone automatically, although you can set a retry limit. A fresh run of the script will keep retrying until all succeed.
+10. There is a simple mechanism to abort the backup gracefully by finishing the current file. The next run will then resume where it left off. If you want to interrupt the current upload, s3tools will allow you to press Ctrl-C to abort, but AWS CLI is more stubborn.
+11. Each new index is also backed up in s3. Old indexes may be discarded as the latest one includes all historic information.
+12. There is an audit script which checks the files at s3 against the index and reschedules any missing backups and reports backup files which have no index entry. This gives you confidence to delete old indexes.
+13. Various log files are produced.
+14. There are a number of additional utility scripts.
+
+Limitations
+===========
+1. This does not "watch" your file system for changes so the latest changes might be lost if your file is deleted before any backup is done. It only backs up on demand, or via a schedule if you set up a regular backup job using cron.
+2. It takes time to manipulate the index for each pass, although you don't have to sit there and watch it.
+3. It doesn't use Amazon's Glacier. Personally I would worry about the cost of restoring from Glacier.
+4. It depends on s3tools or the AWS CLI package. s3tools is a little more complete than AWS CLI.
+5. Restoring a whole folder with many subfolders requires many entries in the index to be modified. However they are easily sorted by path so they will all be together and the modification should be relatively simple particularly in a spreadsheet using copy and paste.
+6. You could accidentally mess up the index while manipulating it. This isn't as serious a problem as it sounds since you have the previous indexes to go back to and the audit script to validate an index.
+7. Your s3 credentials should be stored in a safe vault somewhere in case of catastrophe.
+
