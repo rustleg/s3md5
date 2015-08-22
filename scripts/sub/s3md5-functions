@@ -2,9 +2,9 @@
 # s3md5-functions
 # 
 #   Copyright (C) 2015 
-# This file is part of s3md5 by Russell Gadd <rustleg@gmail.com>
+# This file is part of s3md5bu by Russell Gadd <rustleg@gmail.com>
 #
-# s3md5 is free software; you can redistribute it and/or modify
+# s3md5bu is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
@@ -37,7 +37,7 @@ function initialise-index { # uses latest archived index as current working inde
     # maybe NAS not responding ?
     printf "Backup failed - Cannot find index archive directory\n ${INDEXDIR}\n ... Aborting.\n" 1>&2
 		if [ "${USEZENITY}" = true ]; then
-			zenity --warning --title="s3md5 Backup failed" --text="Backup failed - Cannot find index archive directory" --no-wrap --display=:0.0
+			zenity --warning --title="s3md5bu Backup failed" --text="Backup failed - Cannot find index archive directory" --no-wrap --display=:0.0
 		fi
    	rmdir ${ISRUNNINGDIRECTORY}
     exit 1
@@ -148,7 +148,7 @@ function readbackuproots {
 		printf "No files satisfy the backuproots and excludes selections, aborting.\n"  | tee ${TMPPROGRESSLOG}
 		addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
 		if [ "${USEZENITY}" = true ]; then
-			zenity --warning --title="s3md5 Backup failed" --text="No files satisfy the backuproots and excludes selections" --no-wrap --display=:0.0
+			zenity --warning --title="s3md5bu Backup failed" --text="No files satisfy the backuproots and excludes selections" --no-wrap --display=:0.0
 		fi
 		rmdir ${ISRUNNINGDIRECTORY}
 		exit 1

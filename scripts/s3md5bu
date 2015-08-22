@@ -2,9 +2,9 @@
 # s3md5bu - main backup script
 #
 #   Copyright (C) 2015 
-# This file is part of s3md5 by Russell Gadd <rustleg@gmail.com>
+# This file is part of s3md5bu by Russell Gadd <rustleg@gmail.com>
 #
-# s3md5 is free software; you can redistribute it and/or modify
+# s3md5bu is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
@@ -37,7 +37,7 @@ else
 	exit 1
 fi
 
-printf "**************** s3md5 Backup System *******************\n"
+printf "**************** s3md5bu Backup System *******************\n"
 
 
 initialise
@@ -46,7 +46,7 @@ readstate
 if [ ! -e ${BACKUPROOTS} ] ; then
   printf "Backup failed - No backup roots file\n${BACKUPROOTS}\n ... Aborting.\n" 1>&2
 	if [ "${USEZENITY}" = true ]; then
-		zenity --warning --title="s3md5 Backup failed" --text="No backup roots file" --no-wrap --display=:0.0
+		zenity --warning --title="s3md5bu Backup failed" --text="No backup roots file" --no-wrap --display=:0.0
 	fi
 	rmdir ${ISRUNNINGDIRECTORY}
   exit 1
@@ -174,7 +174,7 @@ do
 			printf "Too many commands failed - exceeded retry limit (${RETRYLIMIT}), aborting.\n"  | tee ${TMPPROGRESSLOG}
 			addtimestamplog ${TMPPROGRESSLOG} ${PROGRESSLOG}
 			if [ "${USEZENITY}" = true ]; then
-				zenity --warning --title="s3md5 Backup failed" --text="Too many commands failed - exceeded retry limit" --no-wrap --display=:0.0
+				zenity --warning --title="s3md5bu Backup failed" --text="Too many commands failed - exceeded retry limit" --no-wrap --display=:0.0
 			fi
 			rmdir ${ISRUNNINGDIRECTORY}
 			exit 1
@@ -201,7 +201,7 @@ do
 		if (( ${REMAININGCOMMANDS} == 0 )) ; then 
 			printf "finished\n" | tee ${TMPPROGRESSLOG}
 			if [ "${USEZENITY}" = true ]; then
-				zenity --info --title="s3md5 Backup" --text="   Completed    " --display=:0.0
+				zenity --info --title="s3md5bu Backup" --text="   Completed    " --display=:0.0
 			fi
 		  FINISHED=true
 		else

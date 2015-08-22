@@ -1,13 +1,15 @@
-# s3md5
-**Linux PC backup to Amazon s3 using bash scripts**
+# s3md5bu
+**Linux file backup to Amazon s3 via Bash scripts**
 
 This is a set of Bash (and Awk) scripts run under Linux which back up user files to Amazon's s3 service. It uses the s3tools package or Amazon's official open source package AWS CLI to do the uploads, downloads and listings.
 
-Most backup systems sync your folder structure to the backup service. Instead this system will back up all files into a single s3 folder (Amazon call this a Prefix) by changing the file name to a 32 character string equal to the file's MD5 hash and ignoring the source folder.
+**Yet another internet backup system?**
 
-It maintains an index to relate the original path/file/timestamp to the MD5-named backup file.
+Most backup systems sync your folder structure to the backup service. Instead this system will back up all files into a single s3 folder (Amazon call this a Prefix) by changing the file name to a 32 character string equal to the file's MD5 hash and ignoring the source folder structure.
 
-No files are ever deleted at s3 unless specifically requested, so all historic copies can be retrieved (thwarts Cryptolocker). Versioning in s3 is not required as the MD5 changes when the file is changed. Different versions are identified by the path/file/timestamp in the index.
+**Why?**
 
-The index is a text file list with tab separated fields which will load into a spreadsheet or text editor. The scripts handle normal maintenance of the index, but for the rare occasions when you need to recover files or want to delete backups you will need to edit the request status in the index entry for the relevant file. Using a spreadsheet can make finding and editing multiple files easy.
+1. Reorganise/rename your files without re-uploading. Multiple copies only require one backup file.
+2. Keep historic versions without overwriting existing backups (thwarts Cryptolocker). s3 versioning not required.
+3. Just click a desktop icon (or schedule via cron) to automatically update the backups. But to clean up (delete) old backups or recover files, first use a text editor or spreadsheet to simply manipulate the backup index, then run the main script. Gives simple but complete control over the backups.
 

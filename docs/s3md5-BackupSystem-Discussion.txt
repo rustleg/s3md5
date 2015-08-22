@@ -1,5 +1,5 @@
-s3md5 Backup System Discussion
-==============================
+s3md5bu Backup System - Discussion
+==================================
 
 Summary
 =======
@@ -7,16 +7,16 @@ This is a set of Bash (and Awk) scripts run under Linux which back up user files
 
 Most backup systems sync your folder structure to the backup service. Instead this system will back up all files into a single s3 folder (Amazon call this a Prefix) by changing the file name to a 32 character string equal to the file's MD5 hash and ignoring the source folder.
 
-It maintains an index to relate the original path/file/timestamp to the backed up file. The index is a text file list with tab separated fields which will load into a spreadsheet or text editor.
+It maintains an index to relate the original path/file/timestamp to the backed up file. The index is a text file list with tab separated fields which will load into a spreadsheet or text editor. The scripts handle normal maintenance of the index, but for the rare occasions when you need to recover files or want to delete backups you will need to edit the request status in the index entry for the relevant file. Using a spreadsheet can make finding and editing multiple file records easy.
 
 No files are ever deleted at s3 unless specifically requested, so all historic copies can be retrieved (thwarts Cryptolocker). Versioning in s3 is not required as the MD5 changes when the file is changed. Different versions are identified by the path/file/timestamp in the index.
 
 Operation
 =========
 
-It can be run simply in a terminal, or use a launcher from an icon on the desktop (my personal preference). Regular runs can be set up using cron. Updates can be done in the foreground or background as they require no user interaction.
+It can be run simply in a terminal, or use a launcher from an icon on the desktop (my personal preference). Regular runs can be set up using cron. Updates can be done in the foreground or background as they require no user interaction. No GUI.
 
-Restoring files from backup require some effort in locating the file(s) in the index and setting a field value to tell the system you want the file downloaded. The file(s) will be downloaded into a separate area and the original folder structure reconstructed. It should be simple for most users who are capable of basic tasks in Linux, to manipulate the relevant index entries using a text editor or spreadsheet. It is my experience that file restoration is a rare event so a little effort without needing sophisticated GUI tools etc is justified.
+Restoring files from backup require locating the file(s) in the index and setting a field value to tell the system you want the file downloaded. The file(s) will be downloaded into a separate area and the original folder structure reconstructed. It should be simple for most users who are capable of basic tasks in Linux, to manipulate the relevant index entries using a text editor or spreadsheet. It is my experience that file restoration is a rare event so a little effort without needing sophisticated GUI tools etc is justified.
 
 For those who worry about 2 different files having the same MD5 hash, a little googling should put your mind at rest.
 
@@ -26,13 +26,14 @@ You need to be running Linux. Some rudimentary knowledge is expected, such as ho
 
 Why?
 ====
-I developed this for two main reasons:
-1. I want to be able to rename files/folders and reorganise my file structure from time to time without requiring the files to be re-uploaded. I did use SpiderOak at one time which has the same feature, but I had issues with it which their developers did not address. (Of course they are more focussed on Windows.)
-2. I don't want to depend on the whims of commercial developers who are always under pressure to add new "features". I prefer to be in control. It does depend currently on using s3tools or the AWS CLI but only uses a few of their basic commands. 
+1. Reorganise/rename your files without re-uploading. Multiple copies only require one backup file.
+2. Keep historic versions without overwriting existing backups (thwarts Cryptolocker). s3 versioning not required.
+3. Just click a desktop icon (or schedule via cron) to automatically update the backups. But to clean up (delete) old backups or recover files, first use a text editor or spreadsheet to simply manipulate the backup index, then run the main script. Gives simple but complete control over the backups.
+4. I don't want to depend on the whims of commercial developers who are always under pressure to add new "features". I prefer to be in control. It does depend currently on using s3tools or the AWS CLI but only uses a few of their basic commands. 
 
 I have a high regard for s3 in terms of reliability and you pay only for what you store. Some commercial storage services subcontract to s3 - Dropbox a prime example.
 
-Other features:
+Features:
 1. Control is via a simple text file index, only needing a text editor or spreadsheet to manipulate on the rare occasions this is necessary (restoring files or deleting old versions)
 2. You don't need versioning turned on at s3. Finding older versions using the index is simple.
 3. Only one copy of any file is stored, avoiding redundant multiple backups.

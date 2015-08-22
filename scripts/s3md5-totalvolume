@@ -2,9 +2,9 @@
 # s3md5-totalvolume - prints volume of storage used at s3 (according to the indexes)
 #
 #   Copyright (C) 2015 
-# This file is part of s3md5 by Russell Gadd <rustleg@gmail.com>
+# This file is part of s3md5bu by Russell Gadd <rustleg@gmail.com>
 #
-# s3md5 is free software; you can redistribute it and/or modify
+# s3md5bu is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.

@@ -1,4 +1,4 @@
-s3md5 Backup System Usage
+s3md5bu Backup System Usage
 =========================
 
 Local Setup
