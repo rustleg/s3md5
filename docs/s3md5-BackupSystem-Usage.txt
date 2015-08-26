@@ -1,5 +1,5 @@
 s3md5bu Backup System Usage
-=========================
+===========================
 
 Local Setup
 ===========
@@ -24,9 +24,51 @@ control must contain:
 
 Edit the script "s3md5-userparameters" which is the first script to get invoked by the backup. This is to specify your directories, and the name of your default s3 bucket. Also a few optional parameters as explained there. Place or copy this script in to your home folder (I keep it in the scripts/sub folder and put a soft link in home). I also use the home folder to contain my AES plain text key file; some users may want to alter the scripts to secure this properly within their system.
 
+Install s3cmd
+=============
+You may find s3cmd in your system's repository. Mine (Linux Mint 17) showed an older version (1.1) which would be simpler to install but instead I downloaded the latest stable version from the s3tools.org website (actually comes from Sourceforge) files: s3cmd-1.5.2.zip, s3cmd-1.5.2.zip.asc
+Verify using gpg
+  #  gpg --verify s3cmd-1.5.2.zip.asc s3cmd-1.5.2.zip
+  will complain that no signature file found, so need to import signature from ID
+  # gpg --recv-keys D1E3393D
+  then redo verify command (warns that Matt Domsch's key not verified with trusted signature)
+I needed to add stuff to python. Used Synaptic to install python-setuptools
+	then use root terminal (or sudo) # python setup.py install
+Configure s3cmd (don't use root account otherwise would have to use root to do backups)
+  $ s3cmd --configure
+  
+Install AWS CLI
+===============
+(Not necessary unless you have issues with s3cmd which is preferred)
+AWS CLI is an alternative to s3cmd. It seems to run a little quicker but it's not as complete as s3cmd.
+My installation notes of this are as follows:
+	check version of Python (needs to be 2.6.3 or later)
+		$ python --version
+		Python 2.7.6
+	from instructions on website 
+		(http://docs.aws.amazon.com/cli/latest/userguide/installing.html#install-bundle-other-os)	   
+	$ wget "https://s3.amazonaws.com/aws-cli/awscli-bundle.zip"
+		(said use curl but curl is not installed in my system)
+	$ unzip awscli-bundle.zip
+	$ sudo ./awscli-bundle/install -i /usr/local/aws -b /usr/local/bin/aws
+		says "You can now run: /usr/local/bin/aws --version
+			$ /usr/local/bin/aws --version
+			aws-cli/1.7.24 Python/2.7.6 Linux/3.13.0-24-generic
+			
+	Configure 
+	$ aws configure
+		AWS Access Key ID [None]: A...................Q
+		AWS Secret Access Key [None]: t......................................v
+		Default region name [None]: eu-west-1
+		Default output format [None]: text
+
+Trickle
+=======
+Install trickle to limit upload bandwidth (I found it in my repository, so used Synaptic)
+
 s3 Setup
 ========
-Use the s3 console in a browser to set up the appropriate buckets and subfolders. Don't turn on Amazon s3 versioning.
+Assuming you have signed up to Amazon's s3, use the s3 console in a browser to set up the appropriate buckets and subfolders. Don't turn on Amazon s3 versioning.
 
 Bucket names have to be all lowercase (Amazon rule) - my system assumes you have a unique prefix to bucket names as all s3 buckets for all customers reside in the same namespace, so your bucket names must not clash with someone else's. Example buckets are as follows - one for a copy of the scripts, docs,etc and 3 separate backup buckets:
 	myuniquename-backupsoftware
@@ -50,7 +92,7 @@ The main backup script is s3md5bu. Run this in a terminal, set it to run using c
 
 There are 2 optional parameters (bucket and throttle) as in this example:
 $ s3md5bu --bucket mybucket2 --throttle 80
--b or --bucket : mybucket2 is a non-default bucket, so you can use several different buckets (each must have its own set of local folders such as bu-mybucket2, see above, and the appropriate subfolders in s3). The default bucket is specified in s3md5-userparameters.
+-b or --bucket : in this example mybucket2 is a non-default bucket. You can use several different buckets (each must have its own set of local folders such as bu-mybucket2, see above, and the appropriate subfolders in s3). The default bucket is specified in s3md5-userparameters. There's no real advantage in separate buckets unless this seems easier for you to manage.
 -t or --throttle: 80 is an upload speed limit in KB/sec. My system typically will upload at around 130 KB/sec but this will mostly hog all bandwidth, so I tend to use about 2/3 of the max speed.
 
 STOP file
